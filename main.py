@@ -8,6 +8,8 @@ Usage:
 """
 
 import argparse
+import logging
+import subprocess
 import sys
 
 
@@ -17,10 +19,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Exemples:
-  python main.py train          Entraîner le modèle PPO
-  python main.py backtest       Backtest sur données 2024+
-  python main.py live           Lancer en mode paper/live trading
-  python main.py dashboard      Ouvrir le dashboard Streamlit
+  python main.py train                    Entraîner le modèle PPO
+  python main.py train --timesteps 500000 Entraîner avec 500k steps
+  python main.py backtest                 Backtest sur données 2024+
+  python main.py backtest --model v1      Backtest avec un modèle spécifique
+  python main.py live                     Lancer en mode paper trading
+  python main.py live --live-mode         Lancer en mode live réel
+  python main.py dashboard               Ouvrir le dashboard Streamlit
         """,
     )
 
@@ -31,38 +36,79 @@ Exemples:
     )
 
     parser.add_argument(
+        "--model",
+        default="ppo_trading",
+        help="Nom du modèle (défaut: ppo_trading)",
+    )
+
+    parser.add_argument(
         "--live-mode",
         action="store_true",
         default=False,
         help="Activer le trading réel (par défaut: paper trading)",
     )
 
+    parser.add_argument(
+        "--timesteps",
+        type=int,
+        default=None,
+        help="Nombre de timesteps d'entraînement (défaut: config)",
+    )
+
+    parser.add_argument(
+        "--nlp",
+        action="store_true",
+        default=False,
+        help="Inclure l'analyse NLP FinBERT",
+    )
+
     args = parser.parse_args()
 
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
+
     if args.command == "train":
-        print("🚀 Lancement de l'entraînement...")
-        # from training.train import run_training
-        # run_training()
-        print("⚠️  Module training pas encore implémenté (Phase 6)")
+        from training.train import train
+
+        kwargs = {
+            "model_name": args.model,
+            "include_nlp": args.nlp,
+        }
+        if args.timesteps:
+            kwargs["total_timesteps"] = args.timesteps
+
+        print("Lancement de l'entraînement...")
+        train(**kwargs)
 
     elif args.command == "backtest":
-        print("📊 Lancement du backtest...")
-        # from training.backtest import run_backtest
-        # run_backtest()
-        print("⚠️  Module backtest pas encore implémenté (Phase 6)")
+        from training.backtest import backtest
+
+        print("Lancement du backtest...")
+        backtest(
+            model_name=args.model,
+            include_nlp=args.nlp,
+        )
 
     elif args.command == "live":
+        from live.executor import run_live
+
         mode = "LIVE" if args.live_mode else "PAPER"
-        print(f"🤖 Lancement du trading en mode {mode}...")
-        # from live.executor import run_live
-        # run_live(live_mode=args.live_mode)
-        print("⚠️  Module live pas encore implémenté (Phase 7)")
+        print(f"Lancement du trading en mode {mode}...")
+        run_live(
+            model_name=args.model,
+            live_mode=args.live_mode,
+            include_nlp=args.nlp,
+        )
 
     elif args.command == "dashboard":
-        print("📈 Lancement du dashboard Streamlit...")
-        # from live.dashboard import run_dashboard
-        # run_dashboard()
-        print("⚠️  Module dashboard pas encore implémenté (Phase 7)")
+        print("Lancement du dashboard Streamlit...")
+        subprocess.run(
+            [sys.executable, "-m", "streamlit", "run",
+             "live/dashboard.py", "--server.headless", "true"],
+            check=True,
+        )
 
 
 if __name__ == "__main__":
