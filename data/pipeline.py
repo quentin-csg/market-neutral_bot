@@ -230,3 +230,71 @@ def get_news_for_dataset(
         grouped = grouped[grouped["timestamp"] < end_dt]
 
     return grouped.reset_index(drop=True)
+
+
+def build_full_pipeline(
+    symbol: str = SYMBOL,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    include_nlp: bool = True,
+    fit_scaler: bool = True,
+    exchange_id: str = EXCHANGE,
+) -> tuple:
+    """
+    Pipeline complet : données brutes → features → normalisation.
+    Relie Phase 2 (data) et Phase 3 (features) en un seul appel.
+
+    Args:
+        symbol: Paire de trading
+        start: Date de début
+        end: Date de fin
+        include_nlp: Si True, analyse NLP FinBERT sur les news
+        fit_scaler: Si True, ajuste le scaler (train). False = réutilise (live).
+        exchange_id: Exchange ccxt
+
+    Returns:
+        Tuple (DataFrame normalisé, FeatureScaler)
+    """
+    from features.nlp import add_sentiment_to_dataframe
+    from features.scaler import FeatureScaler, normalize_features
+    from features.technical import add_all_indicators
+
+    # Étape 1 : Construire le dataset brut (Phase 2)
+    logger.info("=== Pipeline complet : données → features → normalisation ===")
+    dataset = build_dataset(symbol, start, end, exchange_id=exchange_id)
+
+    if dataset.empty:
+        logger.error("Dataset vide, pipeline interrompu")
+        return pd.DataFrame(), FeatureScaler()
+
+    # Étape 2 : Ajouter les indicateurs techniques (Phase 3)
+    logger.info("Ajout des indicateurs techniques...")
+    dataset = add_all_indicators(dataset)
+
+    # Étape 3 : Ajouter le sentiment NLP (Phase 3)
+    if include_nlp:
+        logger.info("Analyse NLP des news...")
+        news_df = fetch_news(filter_by_keywords=True)
+        dataset = add_sentiment_to_dataframe(dataset, news_df)
+    else:
+        dataset["sentiment_score"] = 0.0
+        dataset["n_articles"] = 0
+
+    # Étape 4 : Supprimer les lignes avec trop de NaN (début de série)
+    # Les indicateurs comme SMA_200 ont besoin de 200 bougies avant d'être valides
+    initial_len = len(dataset)
+    dataset = dataset.dropna(thresh=len(dataset.columns) - 5)
+    dataset = dataset.reset_index(drop=True)
+    dropped = initial_len - len(dataset)
+    if dropped > 0:
+        logger.info(f"Supprimé {dropped} lignes avec trop de NaN (warmup indicateurs)")
+
+    # Étape 5 : Normalisation (Phase 3)
+    logger.info("Normalisation des features...")
+    dataset, scaler = normalize_features(dataset, fit=fit_scaler)
+
+    logger.info(
+        f"=== Pipeline terminé: {len(dataset)} lignes, "
+        f"{len(dataset.columns)} colonnes ==="
+    )
+    return dataset, scaler
