@@ -1,14 +1,14 @@
-# =============================================================================
 # Phase 2 — Checklist de validation
-# =============================================================================
-#
-# Toutes les commandes sont à copier-coller dans le REPL Python :
-#   1. Ouvrir un terminal PowerShell dans le dossier Trading-bot
-#   2. Lancer `python`
-#   3. Copier-coller chaque bloc ci-dessous
-#
-# Seul le test pytest (dernier bloc) se lance depuis PowerShell directement.
-#
+
+## Toutes les commandes sont à copier-coller dans le REPL Python :
+
+## 1. Ouvrir un terminal PowerShell dans le dossier Trading-bot
+
+## 2. Lancer `python`
+
+## 3. Copier-coller chaque bloc ci-dessous
+
+## Seul le test pytest (dernier bloc) se lance depuis PowerShell directement.
 
 ## Imports
 

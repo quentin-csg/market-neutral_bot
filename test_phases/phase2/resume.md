@@ -1,6 +1,7 @@
 # Phase 2 — Résumé
 
 ## Objectif
+
 Implémenter le pipeline complet d'ingestion des données : crypto, macro, sentiment et actualités (BLOC 1 du instruction.md).
 
 ## Ce qui a été implémenté

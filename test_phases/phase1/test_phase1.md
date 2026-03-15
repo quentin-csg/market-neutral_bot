@@ -1,10 +1,8 @@
-# =============================================================================
 # Phase 1 — Checklist de validation
-# =============================================================================
-#
-# Exécute chaque commande ci-dessous dans ton terminal (depuis le dossier Trading-bot)
-# et coche la case quand c'est OK.
-#
+
+## Exécute chaque commande ci-dessous dans ton terminal (depuis le dossier Trading-bot)
+
+## et coche la case quand c'est OK
 
 ## Structure du projet
 

@@ -1,11 +1,10 @@
-# =============================================================================
 # Phase 3 — Checklist de validation
-# =============================================================================
-#
-# Toutes les commandes sont à copier-coller dans le REPL Python.
-# Lancer `python` depuis le dossier Trading-bot.
-# Seul le pytest se lance depuis PowerShell directement.
-#
+
+## Toutes les commandes sont à copier-coller dans le REPL Python.
+
+## Lancer `python` depuis le dossier Trading-bot.
+
+## Seul le pytest se lance depuis PowerShell directement.
 
 ## Imports
 
@@ -65,7 +64,7 @@
 
 ## NLP — FinBERT
 
-- [ ] **Analyse de sentiment sur des titres** :
+- [X] **Analyse de sentiment sur des titres** :
   ```python
   from features.nlp import analyze_sentiment
   texts = [
@@ -119,7 +118,7 @@
 
 ## Pipeline complet (Phase 2 → Phase 3)
 
-- [ ] **build_full_pipeline fonctionne de bout en bout** :
+- [X] **build_full_pipeline fonctionne de bout en bout** :
   ```python
   from data.pipeline import build_full_pipeline
   dataset, scaler = build_full_pipeline(start='2024-06-01', end='2024-06-07', include_nlp=False)
@@ -131,13 +130,13 @@
 
 ## Tests unitaires (depuis PowerShell)
 
-- [ ] **Tous les tests passent** :
+- [X] **Tous les tests passent** :
   ```
   python -m pytest tests/test_features.py -v
   ```
   → 22 tests doivent passer (22 passed)
 
-- [ ] **Tests data + features ensemble** :
+- [X] **Tests data + features ensemble** :
   ```
   python -m pytest tests/test_data.py tests/test_features.py -v
   ```
