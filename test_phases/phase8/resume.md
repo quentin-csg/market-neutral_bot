@@ -5,7 +5,7 @@
 | Fichier | Action | Description |
 |---------|--------|-------------|
 | `README.md` | Reecrit | Documentation complete (architecture, install, usage, stack) |
-| `tests/test_integration.py` | Cree | 16 tests d'integration end-to-end |
+| `tests/test_integration.py` | Cree | 19 tests d'integration end-to-end |
 | `data/pipeline.py` | Fix | Scaler load + raw_close + error handling |
 | `training/backtest.py` | Fix | Terminal stats extraction + fit_scaler=False + error handling |
 | `training/train.py` | Fix+Cleanup | Empty dataset error + imports inutilises |
@@ -32,6 +32,9 @@
 8. **CRITICAL: Auto-reset efface les stats terminales** (`backtest.py`) -- DummyVecEnv auto-reset quand done=True, `get_portfolio_stats()` retournait toujours net_worth=10000
 9. **CRITICAL: raw_close data leakage** (`trading_env.py`) -- valeurs ~94000 melangees avec features normalisees [-1,1]
 10. **CRITICAL: Pas de portfolio_stats dans info terminale** (`trading_env.py`) -- aucun moyen de recuperer les stats du backtest apres auto-reset
+
+### Passe 4 (revue exhaustive — fonction par fonction, variable par variable)
+11. **CRITICAL: max_drawdown ne mesurait que le single-step** (`trading_env.py`) -- `get_portfolio_stats()` calculait `1 - exp(r)` pour chaque step au lieu du drawdown cumulatif depuis le pic. Ex: 3 baisses consecutives de -0.5% = 0.5% au lieu de 1.5%. Fix: ajout `self.max_drawdown` suivi en temps reel dans `step()`
 
 ## Gestion d'erreurs ajoutee (passe 3)
 
@@ -61,6 +64,9 @@
 | TestPaperTradingIntegration | test_raw_close_preserved | raw_close preserve a travers la normalisation |
 | TestPaperTradingIntegration | test_raw_close_excluded_from_env_features | raw_close exclue des observations |
 | TestPaperTradingIntegration | test_circuit_breaker_detection | Circuit breaker detecte un crash |
+| TestMaxDrawdownAccuracy | test_max_drawdown_cumulative | Drawdown cumulatif mesure correctement (110→99 = ~10%) |
+| TestMaxDrawdownAccuracy | test_no_drawdown_when_price_only_rises | Drawdown = 0% si prix monte toujours |
+| TestMaxDrawdownAccuracy | test_drawdown_resets_after_new_peak | Drawdown recalcule apres nouveau pic |
 | TestErrorHandling | test_load_agent_missing_file | FileNotFoundError si modele manquant |
 | TestErrorHandling | test_scaler_missing_file | FileNotFoundError si scaler manquant |
 | TestErrorHandling | test_transform_before_fit | RuntimeError si transform avant fit |
@@ -76,6 +82,6 @@
 
 ## Tests
 
-- 16 tests d'integration (8 originaux + 8 nouveaux)
-- Total projet : **130 tests, tous passent**
-- Repartition : 16 data + 22 features + 30 env + 10 agent + 16 training + 20 live + 16 integration
+- 19 tests d'integration (16 precedents + 3 nouveaux max_drawdown)
+- Total projet : **133 tests, tous passent**
+- Repartition : 16 data + 22 features + 30 env + 10 agent + 16 training + 20 live + 19 integration

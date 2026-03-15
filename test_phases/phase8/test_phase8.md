@@ -49,13 +49,19 @@
 - [X] `training/train.py` : erreur si dataset vide apres pipeline
 - [X] `live/executor.py` : try/except dans `_fetch_recent_data` et chargement modele
 
+### Bug corrige (passe 4 -- revue exhaustive)
+- [X] CRITICAL `trading_env.py` : `get_portfolio_stats()` max_drawdown ne mesurait que le drawdown single-step (pas le cumulatif)
+  - Ancien code: `peak * np.exp(r)` traitait chaque return individuellement depuis le pic
+  - Nouveau: `self.max_drawdown` suivi en temps reel dans `step()` avec `self.peak_net_worth`
+  - Ajout `self.max_drawdown = 0.0` dans `reset()` + tracking dans `step()`
+
 ## Tests d'integration (`tests/test_integration.py`)
 
 ### Tests automatiques (pytest)
 ```
 python -m pytest tests/test_integration.py -v
 ```
-**16 tests a verifier :**
+**19 tests a verifier :**
 
 - [X] Pipeline complet train + predict (donnees -> features -> scaler -> env -> train -> save -> load -> predict)
 - [X] Coherence scaler save/load (memes valeurs apres rechargement)
@@ -73,6 +79,9 @@ python -m pytest tests/test_integration.py -v
 - [X] Error handling : `load_agent` fichier manquant → FileNotFoundError
 - [X] Error handling : scaler manquant → FileNotFoundError
 - [X] Error handling : `transform` avant `fit` → RuntimeError
+- [X] Max drawdown cumulatif mesure correctement (110→99 = ~10%)
+- [X] Pas de drawdown si prix monte continuellement (0%)
+- [X] Drawdown se recalcule correctement apres un nouveau pic
 
 ## Tests manuels (REPL Python)
 
@@ -124,4 +133,4 @@ print(f"Nb colonnes scalees: {len(scaler.feature_columns)}")
 ```
 python -m pytest tests/ -v
 ```
-- [X] 130/130 tests passent (dont 16 integration, 8 nouveaux dans la passe 3)
+- [X] 133/133 tests passent (dont 19 integration, 3 nouveaux max_drawdown dans la passe 4)

@@ -494,3 +494,97 @@ class TestErrorHandling:
         df = _make_featured_dataset(n=50, seed=42)
         with pytest.raises(RuntimeError, match="pas .* ajust"):
             scaler.transform(df)
+
+
+class TestMaxDrawdownAccuracy:
+    """Verifie la precision du calcul du max drawdown."""
+
+    def test_max_drawdown_cumulative(self):
+        """Le drawdown cumule sur plusieurs steps est correctement mesure."""
+        # Creer un prix qui monte puis descend de 10% en 2 etapes
+        n = 20
+        prices = [100.0] * n
+        # Prix monte a 110 au step 5, puis descend a 99 sur les steps 6-7
+        prices[5] = 110.0
+        prices[6] = 104.5   # -5% depuis le pic
+        prices[7] = 99.0    # -10% depuis le pic (cumulatif)
+        prices[8] = 99.0
+        for i in range(9, n):
+            prices[i] = 100.0
+
+        df = pd.DataFrame({
+            "close": prices,
+            "rsi": [0.0] * n,
+        })
+
+        env = TradingEnv(df=df, initial_balance=10000.0,
+                         slippage_min=0.0, slippage_max=0.0)
+        env.reset(seed=42)
+
+        # Acheter 100% au step 0
+        env.step(np.array([1.0]))
+
+        # Holdover les steps suivants
+        for _ in range(n - 2):
+            _, _, terminated, _, _ = env.step(np.array([0.0]))
+            if terminated:
+                break
+
+        stats = env.get_portfolio_stats()
+        # Le drawdown max doit etre environ 10% (110 -> 99)
+        assert stats["max_drawdown_pct"] > 5.0, (
+            f"Le drawdown cumule devrait etre > 5%, got {stats['max_drawdown_pct']:.2f}%"
+        )
+
+    def test_no_drawdown_when_price_only_rises(self):
+        """Pas de drawdown si le prix monte continuellement."""
+        n = 20
+        prices = [100.0 + i * 1.0 for i in range(n)]
+        df = pd.DataFrame({"close": prices, "rsi": [0.0] * n})
+
+        env = TradingEnv(df=df, initial_balance=10000.0,
+                         slippage_min=0.0, slippage_max=0.0,
+                         trading_fee=0.0)
+        env.reset(seed=42)
+
+        # Acheter et hold
+        env.step(np.array([1.0]))
+        for _ in range(n - 2):
+            _, _, terminated, _, _ = env.step(np.array([0.0]))
+            if terminated:
+                break
+
+        stats = env.get_portfolio_stats()
+        # Drawdown devrait etre 0 (prix monte toujours)
+        assert stats["max_drawdown_pct"] == pytest.approx(0.0, abs=0.01)
+
+    def test_drawdown_resets_after_new_peak(self):
+        """Le drawdown se recalcule correctement apres un nouveau pic."""
+        n = 30
+        prices = [100.0] * n
+        # Premier pic a 110, descente a 100, puis nouveau pic a 120, descente a 108
+        for i in range(5):
+            prices[i] = 100.0 + i * 2  # monte a 108
+        prices[5] = 110.0  # pic 1
+        prices[6] = 100.0  # -9.1% depuis pic 1
+        prices[7] = 105.0
+        prices[8] = 120.0  # pic 2 (nouveau peak)
+        prices[9] = 108.0  # -10% depuis pic 2
+        for i in range(10, n):
+            prices[i] = 115.0
+
+        df = pd.DataFrame({"close": prices, "rsi": [0.0] * n})
+        env = TradingEnv(df=df, initial_balance=10000.0,
+                         slippage_min=0.0, slippage_max=0.0,
+                         trading_fee=0.0)
+        env.reset(seed=42)
+
+        env.step(np.array([1.0]))
+        for _ in range(n - 2):
+            _, _, terminated, _, _ = env.step(np.array([0.0]))
+            if terminated:
+                break
+
+        stats = env.get_portfolio_stats()
+        # Le max drawdown devrait etre ~10% (120 -> 108)
+        assert stats["max_drawdown_pct"] > 8.0
