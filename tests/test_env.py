@@ -75,12 +75,15 @@ class TestReward(unittest.TestCase):
 
     def test_position_size_penalty(self):
         from agent.reward import position_size_penalty
-        # Petite position → petite pénalité
-        small = position_size_penalty(0.1)
-        # Grosse position → grosse pénalité
+        # En dessous du seuil (70%) → aucune pénalité
+        self.assertEqual(position_size_penalty(0.1), 0.0)
+        self.assertEqual(position_size_penalty(0.7), 0.0)
+        # Au-dessus du seuil → pénalité négative
         large = position_size_penalty(0.9)
-        self.assertLess(large, small)
-        self.assertLess(small, 0)
+        self.assertLess(large, 0.0)
+        # Plus la position est grande, plus la pénalité est grande
+        larger = position_size_penalty(1.0)
+        self.assertLess(larger, large)
 
     def test_transaction_cost_penalty(self):
         from agent.reward import transaction_cost_penalty
@@ -100,7 +103,8 @@ class TestReward(unittest.TestCase):
         self.assertIsInstance(total, float)
         self.assertIsInstance(components, dict)
         self.assertIn("log_return", components)
-        self.assertIn("sharpe", components)
+        self.assertIn("sortino", components)   # Sortino remplace Sharpe
+        self.assertNotIn("sharpe", components) # Sharpe supprimé (redondant)
         self.assertIn("drawdown", components)
         self.assertIn("position_size", components)
         self.assertIn("transaction", components)
@@ -117,6 +121,7 @@ class TestTradingEnv(unittest.TestCase):
         prices = 42000 + np.cumsum(np.random.randn(n) * 100)
         cls.test_df = pd.DataFrame({
             "close": prices,
+            "raw_close": prices.copy(),  # ADD THIS LINE
             "open": prices + np.random.randn(n) * 50,
             "high": prices + abs(np.random.randn(n) * 100),
             "low": prices - abs(np.random.randn(n) * 100),
@@ -143,7 +148,7 @@ class TestTradingEnv(unittest.TestCase):
         obs, info = env.reset(seed=42)
         self.assertEqual(obs.shape, (env.n_obs,))
         self.assertEqual(obs.dtype, np.float32)
-        self.assertEqual(info["balance"], 10000.0)
+        self.assertEqual(info["balance"], 5000.0)
         self.assertEqual(info["position"], 0.0)
 
     def test_step_hold(self):
@@ -152,7 +157,7 @@ class TestTradingEnv(unittest.TestCase):
         env.reset(seed=42)
         obs, reward, terminated, truncated, info = env.step(np.array([0.0]))
         self.assertEqual(info["total_trades"], 0)
-        self.assertAlmostEqual(info["balance"], 10000.0)
+        self.assertAlmostEqual(info["balance"], 5000.0)
 
     def test_step_buy(self):
         """Achat avec action positive."""
@@ -161,7 +166,7 @@ class TestTradingEnv(unittest.TestCase):
         obs, reward, terminated, truncated, info = env.step(np.array([1.0]))
         self.assertEqual(info["total_trades"], 1)
         self.assertGreater(info["position"], 0)
-        self.assertLess(info["balance"], 10000.0)
+        self.assertLess(info["balance"], 5000.0)
 
     def test_step_buy_then_sell(self):
         """Achat puis vente complète."""
@@ -182,16 +187,15 @@ class TestTradingEnv(unittest.TestCase):
         env = self._make_env(trading_fee=0.001, slippage_min=0.0, slippage_max=0.0)
         env.reset(seed=42)
 
-        # Achat 100% → le balance doit être ~0, mais le net_worth < initial
-        # à cause des frais
+        # Achat 100% → le balance doit être quasi-nul (tout dépensé)
         env.step(np.array([1.0]))
-        price = env.prices[env.current_step]
-        position_value = env.position * price
-        net_worth = env.balance + position_value
 
-        # Le net worth doit être inférieur au capital initial à cause des frais
-        self.assertLess(net_worth, 10000.0)
+        # Les frais doivent avoir été payés
         self.assertGreater(env.total_fees_paid, 0)
+        # Après un achat total, le balance USDT doit être quasi-nul
+        self.assertLess(env.balance, 5.0)  # < 5 USDT restants
+        # La position BTC doit être non-nulle
+        self.assertGreater(env.position, 0)
 
     def test_slippage_applied(self):
         """Vérifie que le slippage affecte le prix d'exécution."""
@@ -199,7 +203,7 @@ class TestTradingEnv(unittest.TestCase):
         env.reset(seed=42)
         env.step(np.array([1.0]))
         # Avec 1% de slippage, l'entry price doit être > prix marché
-        self.assertGreater(env.entry_price, env.prices[0])
+        self.assertGreater(env.entry_price, env.prices[env.start_step])
 
     def test_episode_complete(self):
         """Vérifie qu'un épisode se termine correctement."""
@@ -214,7 +218,7 @@ class TestTradingEnv(unittest.TestCase):
             steps += 1
 
         self.assertGreater(steps, 0)
-        self.assertEqual(steps, len(self.test_df) - 1)
+        self.assertEqual(steps, len(self.test_df) - 1 - env.start_step)
 
     def test_portfolio_stats(self):
         """Vérifie le calcul des statistiques de portfolio."""
@@ -309,6 +313,123 @@ class TestTradingEnv(unittest.TestCase):
         self.assertIsInstance(terminated, bool)
         self.assertIsInstance(truncated, bool)
         self.assertIsInstance(info, dict)
+
+    def test_raw_close_used_for_prices(self):
+        """raw_close doit être utilisé comme prix si disponible."""
+        n = 50
+        raw_prices = 40000 + np.arange(n, dtype=float)
+        normalized_prices = np.linspace(-0.5, 0.5, n)  # prices normalisées incorrectes
+        df = pd.DataFrame({
+            "close": normalized_prices,
+            "raw_close": raw_prices,
+            "rsi": [0.0] * n,
+        })
+        from env.trading_env import TradingEnv
+        env = TradingEnv(df=df, min_episode_steps=10)
+        # Les prix utilisés doivent être les raw_close
+        self.assertAlmostEqual(env.prices[0], 40000.0)
+        self.assertNotAlmostEqual(env.prices[0], -0.5, places=3)
+
+    def test_random_start_within_bounds(self):
+        """Le start aléatoire doit être dans une plage valide."""
+        env = self._make_env()
+        for seed in range(10):
+            env.reset(seed=seed)
+            self.assertGreaterEqual(env.start_step, 0)
+            self.assertLessEqual(
+                env.start_step,
+                max(0, len(self.test_df) - env.min_episode_steps - 1)
+            )
+
+    def test_random_start_deterministic_with_seed(self):
+        """Même seed → même start_step."""
+        env = self._make_env()
+        env.reset(seed=99)
+        start1 = env.start_step
+        env.reset(seed=99)
+        start2 = env.start_step
+        self.assertEqual(start1, start2)
+
+    def test_unrealized_pnl_clipped(self):
+        """unrealized_pnl doit être clippé entre -3 et +3."""
+        n = 50
+        prices = [10000.0] * n
+        prices[0] = 1.0  # prix d'entrée très bas pour créer un PnL énorme
+        df = pd.DataFrame({
+            "close": prices,
+            "rsi": [0.0] * n,
+        })
+        from env.trading_env import TradingEnv
+        env = TradingEnv(df=df, initial_balance=5000.0, min_episode_steps=10)
+        env.reset(seed=42)
+        # Forcer un entry_price très bas
+        env.entry_price = 1.0
+        env.position = 0.1
+        obs = env._get_obs()
+        # unrealized_pnl est la 3ème feature portfolio (derniers 3 éléments)
+        unrealized_pnl = obs[-1]
+        self.assertLessEqual(unrealized_pnl, 3.0)
+        self.assertGreaterEqual(unrealized_pnl, -3.0)
+
+    def test_position_size_no_small_penalty(self):
+        """Petites positions (< 70%) ne doivent pas être pénalisées."""
+        from agent.reward import position_size_penalty
+        self.assertEqual(position_size_penalty(0.0), 0.0)
+        self.assertEqual(position_size_penalty(0.5), 0.0)
+        self.assertEqual(position_size_penalty(0.7), 0.0)
+        self.assertLess(position_size_penalty(0.8), 0.0)
+
+
+class TestRewardFixes(unittest.TestCase):
+    """Tests pour les corrections de rewards (Steps 1)."""
+
+    def test_drawdown_penalty_capped(self):
+        """La pénalité ne dépasse jamais -DRAWDOWN_PENALTY_CAP."""
+        from agent.reward import drawdown_penalty
+        from config.settings import DRAWDOWN_PENALTY_CAP
+        # 80% drawdown — sans cap: exp(0.8/0.15)-1 ≈ 205
+        penalty = drawdown_penalty(2000, 10000, threshold=0.15)
+        self.assertGreaterEqual(penalty, -DRAWDOWN_PENALTY_CAP)
+        self.assertLess(penalty, 0)
+
+    def test_sharpe_annualized(self):
+        """Le Sharpe reward est annualisé (facteur sqrt(8760))."""
+        from agent.reward import sharpe_reward
+        # Returns avec variation non-nulle (std > 0) et moyenne positive
+        returns = [0.001 + 0.0002 * (i % 5 - 2) for i in range(30)]
+        result = sharpe_reward(returns, window=24)
+        # Avec annualisation sqrt(8760) ≈ 93.6, le résultat doit être > 1
+        self.assertGreater(result, 1.0)
+        # Vérifier l'annualisation : Sharpe non-annualisé serait bien plus petit
+        raw_returns = np.array(returns[-24:])
+        raw_sharpe = float(np.mean(raw_returns) / np.std(raw_returns))
+        self.assertAlmostEqual(result, raw_sharpe * float(np.sqrt(8760)), places=4)
+
+    def test_sortino_no_downside_capped(self):
+        """Sortino sans returns négatifs est cappé à 3.0."""
+        from agent.reward import sortino_reward
+        # Tous les returns positifs
+        returns = [0.001] * 30
+        result = sortino_reward(returns, window=24)
+        self.assertLessEqual(result, 3.0)
+        self.assertGreater(result, 0)
+
+    def test_sortino_no_downside_zero_mean(self):
+        """Sortino retourne 0 si mean est 0 et pas de downside."""
+        from agent.reward import sortino_reward
+        returns = [0.0] * 30
+        result = sortino_reward(returns, window=24)
+        self.assertEqual(result, 0.0)
+
+    def test_position_size_threshold(self):
+        """La pénalité position ne s'applique qu'au-delà du seuil."""
+        from agent.reward import position_size_penalty
+        from config.settings import POSITION_SIZE_THRESHOLD
+        # Exactement au seuil → 0
+        self.assertEqual(position_size_penalty(POSITION_SIZE_THRESHOLD), 0.0)
+        # Légèrement au-dessus → pénalité
+        above = position_size_penalty(POSITION_SIZE_THRESHOLD + 0.1)
+        self.assertLess(above, 0.0)
 
 
 if __name__ == "__main__":

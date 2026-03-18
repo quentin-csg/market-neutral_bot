@@ -14,10 +14,16 @@ from config.settings import (
     MACRO_SYMBOLS,
     SYMBOL,
     TIMEFRAME,
+    TIMEFRAME_SECONDARY,
     TRAIN_END,
     TRAIN_START,
 )
-from data.crypto_fetcher import fetch_funding_rate, fetch_ohlcv
+from data.crypto_fetcher import (
+    fetch_funding_rate,
+    fetch_ohlcv,
+    fetch_open_interest,
+    fetch_order_book,
+)
 from data.macro_fetcher import fetch_macro_daily
 from data.sentiment_fetcher import fetch_fear_greed_history
 from data.news_fetcher import fetch_news
@@ -60,11 +66,13 @@ def build_dataset(
     logger.info(f"=== Construction du dataset {symbol} ({start} → {end}) ===")
 
     # -------------------------------------------------------------------------
-    # 1. Données crypto OHLCV (1h) — Source principale
+    # 1. Données crypto OHLCV (1h) + (4h) — Sources principales
     # -------------------------------------------------------------------------
-    logger.info("1/4 — Récupération OHLCV crypto...")
+    logger.info("1/5 — Récupération OHLCV crypto 1h + 4h...")
     df_crypto = fetch_ohlcv(symbol, TIMEFRAME, since=start, until=end,
                             exchange_id=exchange_id)
+    df_crypto_4h = fetch_ohlcv(symbol, TIMEFRAME_SECONDARY, since=start, until=end,
+                               exchange_id=exchange_id)
 
     if df_crypto.empty:
         logger.error("Aucune donnée crypto. Impossible de construire le dataset.")
@@ -74,12 +82,12 @@ def build_dataset(
     df_crypto["timestamp"] = df_crypto["timestamp"].dt.floor("h")
     df_crypto = df_crypto.drop_duplicates(subset=["timestamp"], keep="last")
 
-    logger.info(f"   → {len(df_crypto)} bougies crypto")
+    logger.info(f"   → {len(df_crypto)} bougies 1h, {len(df_crypto_4h)} bougies 4h")
 
     # -------------------------------------------------------------------------
     # 2. Données macro (daily → forward-fill sur grille 1h)
     # -------------------------------------------------------------------------
-    logger.info("2/4 — Récupération données macro...")
+    logger.info("2/5 — Récupération données macro...")
     df_macro = fetch_macro_daily(MACRO_SYMBOLS, start=start, end=end)
 
     if not df_macro.empty:
@@ -93,7 +101,7 @@ def build_dataset(
     # -------------------------------------------------------------------------
     # 3. Fear & Greed Index (daily → forward-fill sur grille 1h)
     # -------------------------------------------------------------------------
-    logger.info("3/4 — Récupération Fear & Greed Index...")
+    logger.info("3/5 — Récupération Fear & Greed Index...")
     df_sentiment = fetch_fear_greed_history(limit=0, start=start, end=end)
 
     if not df_sentiment.empty:
@@ -116,7 +124,7 @@ def build_dataset(
     # -------------------------------------------------------------------------
     # 4. Funding rate (si disponible)
     # -------------------------------------------------------------------------
-    logger.info("4/4 — Récupération Funding Rate...")
+    logger.info("4/5 — Récupération Funding Rate...")
     df_funding = fetch_funding_rate(symbol, since=start, exchange_id=exchange_id)
 
     if not df_funding.empty:
@@ -142,6 +150,31 @@ def build_dataset(
 
     if not df_funding.empty:
         dataset = pd.merge(dataset, df_funding, on="timestamp", how="left")
+
+    # -------------------------------------------------------------------------
+    # 5. Orderbook imbalance + Open Interest (snapshot instantané)
+    # -------------------------------------------------------------------------
+    # Note : ces données ne sont pas disponibles historiquement via ccxt.
+    # En training : colonnes remplies à 0.0 (le modèle apprend un poids ~0).
+    # En live : build_full_pipeline est appelé avec les données récentes,
+    #           et l'executor enrichit l'observation avec les valeurs actuelles.
+    logger.info("5/5 — Orderbook imbalance & Open Interest (snapshot)...")
+    try:
+        ob = fetch_order_book(symbol, exchange_id=exchange_id)
+        ob_imbalance = float(ob.get("imbalance", 0.0))
+    except Exception as e:
+        logger.debug(f"Orderbook non disponible: {e}")
+        ob_imbalance = 0.0
+
+    try:
+        oi = float(fetch_open_interest(symbol, exchange_id=exchange_id))
+    except Exception as e:
+        logger.debug(f"Open Interest non disponible: {e}")
+        oi = 0.0
+
+    # Pour l'entraînement historique, on remplit à 0 (pas de données passées)
+    dataset["orderbook_imbalance"] = ob_imbalance
+    dataset["oi_change_pct"] = 0.0  # Variation OI inconnue sans historique
 
     # Ajouter le flag weekend
     dataset["is_weekend"] = dataset["timestamp"].dt.dayofweek.isin([5, 6]).astype(int)
@@ -270,6 +303,13 @@ def build_full_pipeline(
     # Étape 2 : Ajouter les indicateurs techniques (Phase 3)
     logger.info("Ajout des indicateurs techniques...")
     dataset = add_all_indicators(dataset)
+
+    # Étape 2b : Features multi-timeframe (4h)
+    logger.info("Features multi-timeframe 4h...")
+    from features.technical import add_multi_timeframe_features
+    df_4h = fetch_ohlcv(symbol, TIMEFRAME_SECONDARY, since=start, until=end,
+                        exchange_id=exchange_id)
+    dataset = add_multi_timeframe_features(dataset, df_4h)
 
     # Étape 3 : Ajouter le sentiment NLP (Phase 3)
     if include_nlp:

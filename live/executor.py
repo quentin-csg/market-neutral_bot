@@ -8,16 +8,20 @@ Boucle principale qui s'exécute toutes les heures :
   4. Passage d'ordre (paper ou live via ccxt)
 """
 
+import json
 import logging
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional
 
 import ccxt
 import numpy as np
 import pandas as pd
 
-from agent.model import load_agent, make_vec_env
+from stable_baselines3 import PPO
+
+from agent.model import MODEL_FEATURES
 from config.settings import (
     API_KEY,
     API_SECRET,
@@ -26,10 +30,13 @@ from config.settings import (
     FRAME_STACK_SIZE,
     INITIAL_BALANCE,
     LIVE_MODE,
+    LOGS_LIVE_DIR,
+    MODELS_DIR,
     SYMBOL,
     TRADING_FEE,
 )
 from data.pipeline import build_full_pipeline
+from features.scaler import FeatureScaler
 from training.logger import (
     append_weekly_csv,
     log_weekly_summary,
@@ -158,6 +165,12 @@ class LiveExecutor:
         # Paper portfolio (utilisé en mode paper)
         self.paper_portfolio = PaperPortfolio()
 
+        # Modèle et scaler chargés une seule fois
+        self.agent = None
+        self.scaler = None
+        self.feature_columns = MODEL_FEATURES
+        self._load_model()
+
         # Exchange ccxt (utilisé en mode live)
         self.exchange = None
         if self.live_mode:
@@ -181,6 +194,74 @@ class LiveExecutor:
             "enableRateLimit": True,
         })
         logger.info(f"Exchange {EXCHANGE} connecté")
+
+    def _load_model(self):
+        """Charge le modèle PPO et le scaler une seule fois au démarrage."""
+        # Charger le scaler sauvegardé pendant l'entraînement
+        self.scaler = FeatureScaler()
+        self.scaler.load()
+        logger.info("Scaler chargé")
+
+        # Charger le modèle PPO (sans env — on construit les obs manuellement)
+        model_path = MODELS_DIR / self.model_name
+        zip_path = Path(f"{model_path}.zip")
+        if not zip_path.exists():
+            raise FileNotFoundError(
+                f"Modèle introuvable: {zip_path}. "
+                f"Entraînez d'abord avec: python main.py train --model {self.model_name}"
+            )
+        self.agent = PPO.load(str(model_path))
+        logger.info(f"Modèle PPO chargé: {zip_path}")
+
+    def _build_observation(self, dataset: pd.DataFrame) -> np.ndarray:
+        """
+        Construit l'observation empilée (frame_stack) à partir des données récentes.
+
+        Reproduit exactement la logique de TradingEnv._get_obs() + VecFrameStack :
+        - Extrait les features du marché + 3 features portfolio
+        - Empile les `frame_stack` dernières observations
+
+        Returns:
+            np.ndarray de shape (1, frame_stack * n_features)
+        """
+        n_rows = len(dataset)
+        if n_rows < self.frame_stack:
+            raise ValueError(
+                f"Pas assez de données ({n_rows}) pour frame_stack={self.frame_stack}"
+            )
+
+        # Sélectionner les colonnes de features disponibles
+        available_cols = [c for c in self.feature_columns if c in dataset.columns]
+
+        # Construire les observations empilées
+        frames = []
+        for i in range(n_rows - self.frame_stack, n_rows):
+            # Features du marché
+            market = dataset.iloc[i][available_cols].values.astype(np.float32)
+
+            # Features portfolio (depuis PaperPortfolio)
+            current_price = self._get_current_price_at(dataset, i)
+            nw = self.paper_portfolio.net_worth(current_price)
+            balance_ratio = self.paper_portfolio.balance / self.paper_portfolio.initial_balance - 1.0
+            position_value = self.paper_portfolio.position * current_price
+            position_ratio = position_value / max(nw, 1e-8)
+            unrealized_pnl = 0.0
+            if self.paper_portfolio.position > 0 and self.paper_portfolio.entry_price > 0:
+                unrealized_pnl = (current_price - self.paper_portfolio.entry_price) / self.paper_portfolio.entry_price
+
+            portfolio = np.array([balance_ratio, position_ratio, unrealized_pnl], dtype=np.float32)
+            obs = np.concatenate([market, portfolio])
+            frames.append(obs)
+
+        # Empiler et aplatir comme VecFrameStack
+        stacked = np.concatenate(frames)
+        return stacked.reshape(1, -1)
+
+    def _get_current_price_at(self, df: pd.DataFrame, idx: int) -> float:
+        """Récupère le prix réel à un index donné."""
+        if "raw_close" in df.columns:
+            return float(df["raw_close"].iloc[idx])
+        return float(df["close"].iloc[idx])
 
     def _fetch_recent_data(self) -> tuple:
         """
@@ -260,9 +341,75 @@ class LiveExecutor:
 
         return order_info
 
+    def _save_live_state(self, dataset: pd.DataFrame, current_price: float) -> None:
+        """
+        Sauvegarde l'état courant du portfolio dans live_state.json.
+        Utilisé par le dashboard pour afficher le graphe BTC et les positions.
+        """
+        LOGS_LIVE_DIR.mkdir(parents=True, exist_ok=True)
+        state_path = LOGS_LIVE_DIR / "live_state.json"
+
+        stats = self.paper_portfolio.get_stats(current_price)
+        position_usdt = stats["position_btc"] * current_price
+
+        # Historique de prix : dernières 168 bougies (1 semaine H1) — prix réel
+        price_col = "raw_close" if "raw_close" in dataset.columns else "close"
+        ts_col = "timestamp" if "timestamp" in dataset.columns else None
+        price_history = []
+        for _, row in dataset[[ts_col, price_col]].tail(168).iterrows() if ts_col else dataset[[price_col]].tail(168).iterrows():
+            entry = {"price": float(row[price_col])}
+            if ts_col:
+                entry["timestamp"] = str(row[ts_col])
+            price_history.append(entry)
+
+        # Position ouverte courante
+        open_positions = []
+        if self.paper_portfolio.position > 1e-8:
+            entry_price = self.paper_portfolio.entry_price
+            unrealized_pnl_pct = (
+                (current_price - entry_price) / entry_price * 100
+                if entry_price > 0 else 0.0
+            )
+            open_positions.append({
+                "entry_price": entry_price,
+                "amount_btc": self.paper_portfolio.position,
+                "value_usdt": position_usdt,
+                "unrealized_pnl_pct": round(unrealized_pnl_pct, 4),
+            })
+
+        # Trades fermés (toutes les ventes)
+        closed_trades = [
+            t for t in self.paper_portfolio.trade_history
+            if t.get("type") == "sell"
+        ]
+
+        state = {
+            "last_updated": datetime.now().isoformat(),
+            "current_price": current_price,
+            "price_history": price_history,
+            "portfolio": {
+                "net_worth": stats["net_worth"],
+                "balance_usdt": stats["balance_usdt"],
+                "position_btc": stats["position_btc"],
+                "position_usdt": position_usdt,
+                "total_return_pct": stats["total_return_pct"],
+                "total_trades": stats["total_trades"],
+                "total_fees": stats["total_fees"],
+            },
+            "open_positions": open_positions,
+            "closed_trades": closed_trades,
+        }
+
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2, default=str)
+
     def tick(self) -> dict:
         """
         Exécute un cycle de trading (1 tick).
+
+        Le modèle est chargé une seule fois dans __init__. À chaque tick,
+        on fetch les données récentes, construit l'observation directement,
+        et prédit l'action — sans recréer d'environnement.
 
         Returns:
             Dict avec les détails de l'action effectuée
@@ -277,35 +424,12 @@ class LiveExecutor:
 
         current_price = self._get_current_price(dataset)
 
-        # 2. Créer l'environnement et charger le modèle
-        vec_env = make_vec_env(
-            df=dataset,
-            n_envs=1,
-            use_subproc=False,
-            frame_stack=self.frame_stack,
-        )
+        # 2. Construire l'observation directement (sans env)
+        obs = self._build_observation(dataset)
 
-        try:
-            agent = load_agent(vec_env, name=self.model_name)
-        except Exception as e:
-            vec_env.close()
-            raise RuntimeError(
-                f"Impossible de charger le modèle '{self.model_name}'. "
-                f"Vérifiez que models/{self.model_name}.zip existe. "
-                f"Erreur: {e}"
-            ) from e
-
-        # 3. Prédiction : on prend la dernière observation
-        obs = vec_env.reset()
-        # Avancer jusqu'à la fin des données
-        for _ in range(len(dataset) - self.frame_stack - 1):
-            obs, _, dones, _ = vec_env.step(np.array([[0.0]]))
-            if dones[0]:
-                break
-
-        action, _ = agent.predict(obs, deterministic=True)
-        action_value = float(action[0][0])
-        vec_env.close()
+        # 3. Prédiction
+        action, _ = self.agent.predict(obs, deterministic=True)
+        action_value = float(action[0][0]) if action.ndim > 1 else float(action[0])
 
         # 4. Exécuter l'ordre
         if self.live_mode:
@@ -324,11 +448,14 @@ class LiveExecutor:
 
         if not self.live_mode:
             stats = self.paper_portfolio.get_stats(current_price)
+            position_usdt = stats["position_btc"] * current_price
             logger.info(
                 f"  Portfolio: {stats['net_worth']:.2f} USDT | "
-                f"Position: {stats['position_btc']:.6f} BTC | "
+                f"Position: {stats['position_btc']:.6f} BTC "
+                f"(≈ {position_usdt:.2f} USDT) | "
                 f"Trades: {stats['total_trades']}"
             )
+            self._save_live_state(dataset, current_price)
 
         return {
             "action": action_value,
@@ -363,8 +490,11 @@ class LiveExecutor:
 
                     if not self.live_mode:
                         stats = self.paper_portfolio.get_stats(result["price"])
+                        position_usdt = stats["position_btc"] * result["price"]
                         print(
-                            f"  Net worth: {stats['net_worth']:.2f} | "
+                            f"  Net worth: {stats['net_worth']:.2f} USDT | "
+                            f"Position: {stats['position_btc']:.6f} BTC "
+                            f"(≈ {position_usdt:.2f} USDT) | "
                             f"Return: {stats['total_return_pct']:+.2f}%"
                         )
 

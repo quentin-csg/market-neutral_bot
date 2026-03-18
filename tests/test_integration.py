@@ -63,6 +63,12 @@ def _make_featured_dataset(n: int = 500, seed: int = 42) -> pd.DataFrame:
     # Ajouter sentiment
     df["sentiment_score"] = 0.0
     df["n_articles"] = 0
+    # Multi-timeframe features (pas disponibles en test — remplir avec 0)
+    for col in ("rsi_4h_normalized", "sma_trend_4h"):
+        if col not in df.columns:
+            df[col] = 0.0
+    # Sauvegarder les prix bruts avant normalisation pour TradingEnv
+    df["raw_close"] = df["close"].copy()
     return df
 
 
@@ -102,7 +108,7 @@ class TestEndToEnd:
         assert obs_shape[0] > 0
 
         # 5. Entrainer l'agent
-        agent = create_agent(vec_env, tensorboard_log=None, seed=42)
+        agent = create_agent(vec_env, tensorboard_log=None, seed=42, use_cnn=False)
         agent.learn(total_timesteps=64)
 
         # 6. Sauvegarder le modele
@@ -167,7 +173,7 @@ class TestBacktestIntegration:
         vec_env = make_vec_env(
             df=df_scaled, n_envs=1, use_subproc=False, frame_stack=4,
         )
-        agent = create_agent(vec_env, tensorboard_log=None, seed=42)
+        agent = create_agent(vec_env, tensorboard_log=None, seed=42, use_cnn=False)
         agent.learn(total_timesteps=64)
         save_agent(agent, name="bt_test", path=tmp_path)
         vec_env.close()
@@ -215,7 +221,7 @@ class TestBacktestIntegration:
         vec_env = make_vec_env(
             df=df_scaled, n_envs=1, use_subproc=False, frame_stack=4,
         )
-        agent = create_agent(vec_env, tensorboard_log=None, seed=42)
+        agent = create_agent(vec_env, tensorboard_log=None, seed=42, use_cnn=False)
         agent.learn(total_timesteps=128)
         save_agent(agent, name="bt_reset_test", path=tmp_path)
         vec_env.close()

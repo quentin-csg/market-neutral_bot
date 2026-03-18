@@ -13,10 +13,15 @@ import logging
 import numpy as np
 
 from config.settings import (
+    DRAWDOWN_PENALTY_CAP,
     MAX_DRAWDOWN_PENALTY,
     POSITION_SIZE_PENALTY_FACTOR,
+    POSITION_SIZE_THRESHOLD,
     SHARPE_WINDOW,
 )
+
+# Facteur d'annualisation pour des returns horaires (sqrt(8760 heures/an))
+ANNUALIZATION_FACTOR = float(np.sqrt(8760))
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +55,7 @@ def sharpe_reward(returns_history: list[float], window: int = SHARPE_WINDOW) -> 
     std = np.std(recent)
     if std < 1e-10:
         return 0.0
-    return float(np.mean(recent) / std)
+    return float(np.mean(recent) / std * ANNUALIZATION_FACTOR)
 
 
 def sortino_reward(returns_history: list[float], window: int = SHARPE_WINDOW) -> float:
@@ -64,12 +69,14 @@ def sortino_reward(returns_history: list[float], window: int = SHARPE_WINDOW) ->
     recent = np.array(returns_history[-window:])
     downside = recent[recent < 0]
     if len(downside) < 1:
-        return float(np.mean(recent)) * 10 if np.mean(recent) > 0 else 0.0
+        # Pas de returns négatifs : retourner un Sortino cappé
+        mean_val = float(np.mean(recent))
+        return min(mean_val / 1e-8, 3.0) if mean_val > 0 else 0.0
 
     downside_std = np.std(downside)
     if downside_std < 1e-10:
         return 0.0
-    return float(np.mean(recent) / downside_std)
+    return float(np.mean(recent) / downside_std * ANNUALIZATION_FACTOR)
 
 
 def drawdown_penalty(
@@ -96,9 +103,9 @@ def drawdown_penalty(
     if drawdown <= 0:
         return 0.0
 
-    # Pénalité exponentielle au-delà du seuil
+    # Pénalité exponentielle au-delà du seuil, cappée pour éviter les spikes
     if drawdown > threshold:
-        return -float(np.exp(drawdown / threshold) - 1)
+        return max(-float(np.exp(drawdown / threshold) - 1), -DRAWDOWN_PENALTY_CAP)
 
     # Pénalité linéaire sous le seuil
     return -drawdown
@@ -107,19 +114,25 @@ def drawdown_penalty(
 def position_size_penalty(
     position_ratio: float,
     factor: float = POSITION_SIZE_PENALTY_FACTOR,
+    threshold: float = POSITION_SIZE_THRESHOLD,
 ) -> float:
     """
     Pénalité quadratique pour les positions trop grosses (instruction.md).
     Plus la position est grande par rapport au capital, plus le risque augmente.
+    Aucune pénalité en dessous du seuil (threshold), seul l'excès au-dessus
+    du seuil est pénalisé.
 
     Args:
         position_ratio: ratio |position_value| / net_worth (entre 0 et 1)
         factor: facteur multiplicatif de la pénalité
+        threshold: seuil en dessous duquel aucune pénalité n'est appliquée
 
     Returns:
-        Pénalité négative
+        Pénalité négative, ou 0.0 si position_ratio <= threshold
     """
-    return -factor * position_ratio ** 2
+    if position_ratio <= threshold:
+        return 0.0
+    return -factor * (position_ratio - threshold) ** 2
 
 
 def transaction_cost_penalty(trade_cost: float, net_worth: float) -> float:
@@ -164,17 +177,19 @@ def compute_reward(
         Tuple (reward_total, dict des composantes pour logging)
     """
     if weights is None:
+        # Somme = 2.0 — log_return dominant, pénalités légères
+        # Sortino seul (vs Sharpe+Sortino) : moins de corrélation dans le gradient
         weights = {
             "log_return": 1.0,
-            "sharpe": 0.5,
-            "drawdown": 1.0,
-            "position_size": 0.3,
-            "transaction": 1.0,
+            "sortino": 0.3,   # Sortino remplace Sharpe (pénalise uniquement la volatilité baissière)
+            "drawdown": 0.5,
+            "position_size": 0.1,
+            "transaction": 0.1,
         }
 
     components = {
         "log_return": log_return_reward(net_worth, prev_net_worth),
-        "sharpe": sharpe_reward(returns_history),
+        "sortino": sortino_reward(returns_history),
         "drawdown": drawdown_penalty(net_worth, peak_net_worth),
         "position_size": position_size_penalty(position_ratio),
         "transaction": transaction_cost_penalty(trade_cost, net_worth),

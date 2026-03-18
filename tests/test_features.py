@@ -40,6 +40,11 @@ class TestTechnicalIndicators:
             add_zscore,
             add_volume_features,
             add_returns,
+            add_macd,
+            add_adx,
+            add_multi_timeframe_features,
+            add_candle_features,
+            add_price_position_features,
         )
         assert callable(add_all_indicators)
 
@@ -120,12 +125,128 @@ class TestTechnicalIndicators:
         # Colonnes originales préservées
         for col in ["timestamp", "open", "high", "low", "close", "volume"]:
             assert col in result.columns
+        assert "candle_body" in result.columns
+        assert "upper_wick_ratio" in result.columns
+        assert "lower_wick_ratio" in result.columns
+        assert "price_to_high_20" in result.columns
+        assert "price_to_low_20" in result.columns
+
+    def test_add_macd(self):
+        from features.technical import add_macd
+        df = _make_ohlcv_df()
+        result = add_macd(df)
+        assert "macd" in result.columns
+        assert "macd_histogram" in result.columns
+        assert "macd_signal_line" in result.columns
+        assert "macd_hist_normalized" in result.columns
+        # macd_hist_normalized doit être scale-indépendant (~0 autour de 0)
+        valid = result["macd_hist_normalized"].dropna()
+        assert len(valid) > 0
+        # Les valeurs normalisées doivent être petites par rapport à 1
+        assert valid.abs().max() < 1.0
+
+    def test_add_adx(self):
+        from features.technical import add_adx
+        df = _make_ohlcv_df()
+        result = add_adx(df)
+        assert "adx" in result.columns
+        assert "adx_normalized" in result.columns
+        # ADX normalisé entre 0 et 1
+        valid = result["adx_normalized"].dropna()
+        assert len(valid) > 0
+        assert (valid >= 0).all()
+        assert (valid <= 1).all()
+
+    def test_add_macd_in_all_indicators(self):
+        from features.technical import add_all_indicators
+        df = _make_ohlcv_df()
+        result = add_all_indicators(df)
+        assert "macd_hist_normalized" in result.columns
+        assert "adx_normalized" in result.columns
+
+    def test_add_multi_timeframe_features(self):
+        from features.technical import add_multi_timeframe_features
+        df_1h = _make_ohlcv_df(n=300)
+        # Simuler un DataFrame 4h (1 point toutes les 4 heures)
+        df_4h = df_1h.iloc[::4].copy().reset_index(drop=True)
+        result = add_multi_timeframe_features(df_1h, df_4h)
+        assert "rsi_4h_normalized" in result.columns
+        assert "sma_trend_4h" in result.columns
+        # Même nombre de lignes que df_1h
+        assert len(result) == len(df_1h)
+
+    def test_multi_timeframe_empty_4h(self):
+        """Retourne NaN si le DataFrame 4h est vide."""
+        from features.technical import add_multi_timeframe_features
+        df_1h = _make_ohlcv_df(n=100)
+        df_4h_empty = pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
+        result = add_multi_timeframe_features(df_1h, df_4h_empty)
+        assert "rsi_4h_normalized" in result.columns
+        assert result["rsi_4h_normalized"].isna().all()
+
+    def test_multi_timeframe_rsi_range(self):
+        """RSI 4h normalisé entre -1 et +1."""
+        from features.technical import add_multi_timeframe_features
+        df_1h = _make_ohlcv_df(n=400)
+        df_4h = df_1h.iloc[::4].copy().reset_index(drop=True)
+        result = add_multi_timeframe_features(df_1h, df_4h)
+        valid = result["rsi_4h_normalized"].dropna()
+        if len(valid) > 0:
+            assert valid.between(-1, 1).all()
 
     def test_empty_dataframe(self):
         from features.technical import add_all_indicators
         df = pd.DataFrame(columns=["timestamp", "open", "high", "low", "close", "volume"])
         result = add_all_indicators(df)
         assert isinstance(result, pd.DataFrame)
+
+    def test_add_candle_features(self):
+        from features.technical import add_candle_features
+        df = _make_ohlcv_df()
+        result = add_candle_features(df)
+        assert "candle_body" in result.columns
+        assert "upper_wick_ratio" in result.columns
+        assert "lower_wick_ratio" in result.columns
+        # candle_body entre -1 et +1
+        valid_body = result["candle_body"].dropna()
+        assert len(valid_body) > 0
+        assert (valid_body >= -1).all() and (valid_body <= 1).all()
+        # wick ratios entre 0 et 1
+        for col in ["upper_wick_ratio", "lower_wick_ratio"]:
+            valid = result[col].dropna()
+            assert len(valid) > 0
+            assert (valid >= 0).all() and (valid <= 1).all()
+
+    def test_add_price_position_features(self):
+        from features.technical import add_price_position_features
+        df = _make_ohlcv_df()
+        result = add_price_position_features(df, window=20)
+        assert "price_to_high_20" in result.columns
+        assert "price_to_low_20" in result.columns
+        # price_to_high_20 doit être ≤ 0 (prix ≤ high récent)
+        valid_high = result["price_to_high_20"].dropna()
+        assert len(valid_high) > 0
+        assert (valid_high <= 1e-10).all()  # petit epsilon pour float precision
+        # price_to_low_20 doit être ≥ 0 (prix ≥ low récent)
+        valid_low = result["price_to_low_20"].dropna()
+        assert len(valid_low) > 0
+        assert (valid_low >= -1e-10).all()
+
+    def test_candle_features_in_all_indicators(self):
+        from features.technical import add_all_indicators
+        df = _make_ohlcv_df()
+        result = add_all_indicators(df)
+        for col in ["candle_body", "upper_wick_ratio", "lower_wick_ratio",
+                    "price_to_high_20", "price_to_low_20"]:
+            assert col in result.columns, f"{col} manquant dans add_all_indicators"
+
+    def test_candle_features_missing_open(self):
+        """Sans colonne open, retourne NaN."""
+        from features.technical import add_candle_features
+        df = _make_ohlcv_df().drop(columns=["open"])
+        result = add_candle_features(df)
+        assert "candle_body" in result.columns
+        assert result["candle_body"].isna().all()
 
 
 class TestNLP:

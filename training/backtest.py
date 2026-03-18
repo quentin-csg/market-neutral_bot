@@ -12,7 +12,7 @@ from typing import Optional
 
 import numpy as np
 
-from agent.model import load_agent, make_vec_env
+from agent.model import get_feature_set, load_agent, load_vec_normalize, make_vec_env
 from config.settings import (
     FRAME_STACK_SIZE,
     TEST_END,
@@ -70,7 +70,9 @@ def backtest(
     print(f"  → {len(dataset)} bougies, {len(dataset.columns)} colonnes")
 
     # 2. Créer l'environnement
-    print(f"[2/4] Création de l'environnement (stack={frame_stack})...")
+    if feature_columns is None:
+        feature_columns = get_feature_set("v3")
+    print(f"[2/4] Création de l'environnement (stack={frame_stack}, {len(feature_columns)} features)...")
     vec_env = make_vec_env(
         df=dataset,
         n_envs=1,
@@ -79,8 +81,9 @@ def backtest(
         frame_stack=frame_stack,
     )
 
-    # 3. Charger le modèle
+    # 3. Charger le modèle et les stats VecNormalize
     print(f"[3/4] Chargement du modèle: {model_name}...")
+    load_vec_normalize(vec_env)
     try:
         agent = load_agent(vec_env, name=model_name)
     except FileNotFoundError:

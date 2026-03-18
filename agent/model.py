@@ -13,19 +13,26 @@ from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
+import torch
+import torch.nn as nn
 from stable_baselines3 import PPO
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.vec_env import (
     DummyVecEnv,
     SubprocVecEnv,
     VecFrameStack,
+    VecNormalize,
 )
 
 from config.settings import (
+    CNN_FEATURES_DIM,
     FRAME_STACK_SIZE,
     MODELS_DIR,
     N_ENVS,
     PPO_HYPERPARAMS,
     TENSORBOARD_LOG_DIR,
+    USE_CNN,
+    VECNORM_PATH,
 )
 from env.trading_env import TradingEnv
 
@@ -33,33 +40,98 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# FEATURE SETS pour l'entraînement progressif
+# FEATURE SETS — Entraînement progressif (sans doublons)
 # =============================================================================
 
-# V1 : OHLCV + indicateurs techniques de base
+# V1 : Tech de base — momentum + tendance + volatilité (7 features)
 FEATURES_V1 = [
-    "close", "open", "high", "low", "volume",
-    "rsi", "rsi_normalized",
-    "sma_50", "sma_200", "sma_trend",
+    "rsi_normalized",        # Momentum / surachat-survente (-1 à +1)
+    "sma_trend",             # Direction de tendance long terme (+1/-1)
+    "price_to_sma_long",     # Distance au trend long terme
+    "atr_pct",               # Volatilité normalisée (% du prix)
+    "bb_position",           # Position dans les bandes de Bollinger
+    "bb_bandwidth",          # Compression de volatilité (squeeze)
+    "log_return",            # Return 1h (momentum court terme)
 ]
 
-# V2 : V1 + macro + sentiment global
+# V2 : + Volume + Momentum multi-horizon + Macro (14 features)
 FEATURES_V2 = FEATURES_V1 + [
-    "qqq_close", "spy_close",
-    "fear_greed_normalized", "funding_rate",
-    "atr", "atr_pct",
-    "bb_position", "bb_bandwidth",
-    "zscore",
-    "volume_ratio", "volume_direction",
-    "log_return", "log_return_5h", "log_return_24h",
-    "is_weekend",
+    "volume_ratio",          # Anomalies de volume (vs moyenne 20p)
+    "volume_direction",      # Volume × direction du prix
+    "log_return_5h",         # Return 5h (momentum moyen terme)
+    "log_return_24h",        # Return 24h (momentum long terme)
+    "fear_greed_normalized", # Sentiment global du marché (-1 à +1)
+    "funding_rate",          # Positionnement long/short du marché
+    "is_weekend",            # Régime de marché (weekend/semaine)
 ]
 
-# V3 : V2 + NLP sentiment
+# V3 : V2 + MACD + ADX + Multi-timeframe + Candles + Price position (23 features)
 FEATURES_V3 = FEATURES_V2 + [
-    "sentiment_score", "n_articles",
-    "price_to_sma_long",
+    "macd_hist_normalized",  # Momentum + signal de retournement (scale-free)
+    "adx_normalized",        # Force de la tendance (0-1, indépendant de direction)
+    "rsi_4h_normalized",     # RSI 4h — contexte macro momentum
+    "sma_trend_4h",          # Tendance long terme 4h (+1/-1)
+    "candle_body",           # Corps de bougie normalisé (-1 bearish, +1 bullish)
+    "upper_wick_ratio",      # Rejet de résistance (0 à 1)
+    "lower_wick_ratio",      # Rejet de support (0 à 1)
+    "price_to_high_20",      # Distance au plus haut 20p — résistances (≤ 0)
+    "price_to_low_20",       # Distance au plus bas 20p — supports (≥ 0)
 ]
+
+# Alias pour accès direct au set complet (V3 = toutes les features)
+MODEL_FEATURES = FEATURES_V3
+
+# Features live-only (pas d'historique → ne pas inclure dans le training par défaut)
+FEATURES_LIVE_ONLY = [
+    "orderbook_imbalance",  # Imbalance bid/ask en temps réel
+    "oi_change_pct",        # Variation d'Open Interest (futures)
+]
+
+
+# =============================================================================
+# CNN 1D — Feature Extractor pour patterns temporels
+# =============================================================================
+
+class CustomCNN1D(BaseFeaturesExtractor):
+    """
+    CNN 1D feature extractor pour détecter des patterns temporels
+    dans les observations empilées par VecFrameStack.
+
+    Input:  (batch, n_stack * n_features) — vecteur aplati par VecFrameStack
+    Output: (batch, features_dim) — features extraites pour le policy head PPO
+    """
+
+    def __init__(self, observation_space, n_features: int, n_stack: int,
+                 features_dim: int = CNN_FEATURES_DIM):
+        super().__init__(observation_space, features_dim)
+        self.n_features = n_features
+        self.n_stack = n_stack
+
+        # Conv1d: in_channels=n_features, séquence=n_stack
+        self.cnn = nn.Sequential(
+            nn.Conv1d(in_channels=n_features, out_channels=32, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(in_channels=32, out_channels=64, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool1d(1),  # Pool temporel → (batch, 64, 1)
+            nn.Flatten(),
+        )
+
+        self.fc = nn.Sequential(
+            nn.Linear(64, features_dim),
+            nn.ReLU(),
+            nn.Dropout(p=0.1),
+        )
+
+    def forward(self, observations: torch.Tensor) -> torch.Tensor:
+        batch_size = observations.shape[0]
+        # Reshape: (batch, n_stack * n_features) → (batch, n_stack, n_features)
+        x = observations.reshape(batch_size, self.n_stack, self.n_features)
+        # Conv1d attend (batch, channels, seq_len) → transpose
+        x = x.permute(0, 2, 1)  # → (batch, n_features, n_stack)
+        x = self.cnn(x)
+        x = self.fc(x)
+        return x
 
 
 def make_env(
@@ -94,10 +166,13 @@ def make_vec_env(
     feature_columns: Optional[list[str]] = None,
     use_subproc: bool = False,
     frame_stack: int = FRAME_STACK_SIZE,
+    normalize: bool = True,
     **env_kwargs: Any,
 ) -> VecFrameStack:
     """
-    Crée un environnement vectorisé avec frame stacking.
+    Crée un environnement vectorisé avec normalisation des rewards et frame stacking.
+
+    Pipeline: DummyVecEnv/SubprocVecEnv → VecNormalize → VecFrameStack
 
     Args:
         df: DataFrame avec les données de marché
@@ -105,6 +180,7 @@ def make_vec_env(
         feature_columns: colonnes à utiliser comme features
         use_subproc: True = SubprocVecEnv (multi-process), False = DummyVecEnv
         frame_stack: nombre de frames empilées (24 = 1 jour H1)
+        normalize: True = ajouter VecNormalize (norm_obs=False, norm_reward=True)
         **env_kwargs: paramètres additionnels pour TradingEnv
 
     Returns:
@@ -122,6 +198,17 @@ def make_vec_env(
         vec_env = DummyVecEnv(env_fns)
         logger.info(f"DummyVecEnv créé avec {n_envs} environnements")
 
+    # Normalisation des rewards (obs déjà normalisées par FeatureScaler)
+    if normalize:
+        vec_env = VecNormalize(
+            vec_env,
+            norm_obs=False,
+            norm_reward=True,
+            clip_obs=10.0,
+            clip_reward=10.0,
+        )
+        logger.info("VecNormalize appliqué (norm_obs=False, norm_reward=True)")
+
     # Empiler les observations pour donner de la mémoire à l'agent
     stacked_env = VecFrameStack(vec_env, n_stack=frame_stack)
     logger.info(f"VecFrameStack: {frame_stack} frames empilées")
@@ -134,6 +221,9 @@ def create_agent(
     hyperparams: Optional[dict] = None,
     tensorboard_log: Optional[str] = TENSORBOARD_LOG_DIR,
     seed: Optional[int] = None,
+    use_cnn: bool = USE_CNN,
+    n_features: Optional[int] = None,
+    frame_stack: int = FRAME_STACK_SIZE,
 ) -> PPO:
     """
     Instancie un agent PPO avec les hyperparamètres configurés.
@@ -143,6 +233,9 @@ def create_agent(
         hyperparams: dict d'hyperparamètres (None = utiliser config/settings.py)
         tensorboard_log: chemin pour les logs TensorBoard (None = pas de logs)
         seed: seed pour la reproductibilité
+        use_cnn: True = CNN 1D extractor, False = MLP classique
+        n_features: nombre de features par observation (pour CNN reshape)
+        frame_stack: nombre de frames empilées (pour CNN reshape)
 
     Returns:
         Agent PPO prêt à être entraîné
@@ -151,17 +244,38 @@ def create_agent(
     if hyperparams:
         params.update(hyperparams)
 
+    policy_kwargs = {}
+    if use_cnn:
+        # Déduire n_features depuis l'obs space si non fourni
+        obs_dim = env.observation_space.shape[0]
+        if n_features is None:
+            n_features = obs_dim // frame_stack
+        policy_kwargs = dict(
+            features_extractor_class=CustomCNN1D,
+            features_extractor_kwargs=dict(
+                n_features=n_features,
+                n_stack=frame_stack,
+                features_dim=CNN_FEATURES_DIM,
+            ),
+        )
+        logger.info(
+            f"CNN 1D activé: {n_features} features × {frame_stack} frames "
+            f"→ {CNN_FEATURES_DIM}d output"
+        )
+
     agent = PPO(
         policy="MlpPolicy",
         env=env,
         tensorboard_log=tensorboard_log,
         seed=seed,
+        policy_kwargs=policy_kwargs if policy_kwargs else None,
         **params,
     )
 
     obs_shape = env.observation_space.shape
+    arch = "CNN 1D" if use_cnn else "MLP"
     logger.info(
-        f"Agent PPO créé | obs_shape={obs_shape} | "
+        f"Agent PPO créé [{arch}] | obs_shape={obs_shape} | "
         f"lr={params['learning_rate']} | batch_size={params['batch_size']}"
     )
 
@@ -219,17 +333,85 @@ def load_agent(
     return agent
 
 
-def get_feature_set(version: str = "v1") -> list[str]:
+def _get_vec_normalize(vec_env) -> Optional[VecNormalize]:
+    """Traverse la wrapper chain pour trouver le VecNormalize."""
+    env = vec_env
+    while env is not None:
+        if isinstance(env, VecNormalize):
+            return env
+        env = getattr(env, "venv", None)
+    return None
+
+
+def save_vec_normalize(vec_env, path: Optional[Path] = None) -> Path:
     """
-    Retourne le set de features pour l'entraînement progressif.
+    Sauvegarde les stats de VecNormalize (running mean/var des rewards).
 
     Args:
-        version: "v1" (OHLCV+tech), "v2" (+macro), "v3" (+NLP)
+        vec_env: environnement vectorisé (VecFrameStack wrappant VecNormalize)
+        path: chemin du fichier (None = VECNORM_PATH)
+
+    Returns:
+        Chemin du fichier sauvegardé
+    """
+    save_path = path or VECNORM_PATH
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    vn = _get_vec_normalize(vec_env)
+    if vn is None:
+        logger.warning("Pas de VecNormalize trouvé dans la wrapper chain")
+        return save_path
+
+    vn.save(str(save_path))
+    logger.info(f"VecNormalize stats sauvegardées: {save_path}")
+    return save_path
+
+
+def load_vec_normalize(vec_env, path: Optional[Path] = None) -> None:
+    """
+    Charge les stats de VecNormalize et configure en mode eval.
+
+    Args:
+        vec_env: environnement vectorisé contenant un VecNormalize
+        path: chemin du fichier (None = VECNORM_PATH)
+    """
+    load_path = path or VECNORM_PATH
+    if not load_path.exists():
+        logger.warning(f"VecNormalize stats introuvables: {load_path}")
+        return
+
+    vn = _get_vec_normalize(vec_env)
+    if vn is None:
+        logger.warning("Pas de VecNormalize trouvé dans la wrapper chain")
+        return
+
+    # Charger les stats sauvegardées
+    saved_vn = VecNormalize.load(str(load_path), vn.venv)
+    vn.obs_rms = saved_vn.obs_rms
+    vn.ret_rms = saved_vn.ret_rms
+
+    # Mode évaluation : pas de mise à jour des stats, pas de normalisation des rewards
+    vn.training = False
+    vn.norm_reward = False
+
+    logger.info(f"VecNormalize stats chargées (mode eval): {load_path}")
+
+
+def get_feature_set(version: str = "v1") -> list[str]:
+    """
+    Retourne le set de features pour l'entraînement.
+
+    Args:
+        version: "v1" = features curées (14), "v1_legacy"/"v2_legacy"/"v3_legacy" = anciens sets
 
     Returns:
         Liste des noms de colonnes
     """
-    sets = {"v1": FEATURES_V1, "v2": FEATURES_V2, "v3": FEATURES_V3}
+    sets = {
+        "v1": FEATURES_V1,
+        "v2": FEATURES_V2,
+        "v3": FEATURES_V3,
+    }
     if version not in sets:
         raise ValueError(f"Version inconnue: {version}. Choix: {list(sets.keys())}")
     return sets[version]

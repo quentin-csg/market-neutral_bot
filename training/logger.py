@@ -28,6 +28,7 @@ def _get_dirs(mode: Mode = "train") -> dict[str, Path]:
     return {
         "weekly": base / "weekly",
         "backtests": base / "backtests",
+        "walk_forward": base / "walk_forward",
         "weekly_csv": base / "weekly_summary.csv",
         "monthly_csv": base / "monthly_summary.csv",
         "tensorboard": base / "tensorboard",
@@ -72,6 +73,7 @@ def _ensure_dirs(mode: Mode = "train"):
     dirs = _get_dirs(mode)
     dirs["weekly"].mkdir(parents=True, exist_ok=True)
     dirs["backtests"].mkdir(parents=True, exist_ok=True)
+    dirs["walk_forward"].mkdir(parents=True, exist_ok=True)
     dirs["tensorboard"].mkdir(parents=True, exist_ok=True)
 
 
@@ -274,6 +276,66 @@ def load_backtest_results(
     for filepath in sorted(dirs["backtests"].glob("backtest_*.json")):
         if model_name and model_name not in filepath.name:
             continue
+        with open(filepath, "r", encoding="utf-8") as f:
+            results.append(json.load(f))
+
+    return results
+
+
+def log_walk_forward_result(
+    fold_results: list[dict],
+    aggregate: dict,
+    run_name: Optional[str] = None,
+    mode: Mode = "train",
+) -> Path:
+    """
+    Sauvegarde les résultats de walk-forward validation au format JSON.
+
+    Args:
+        fold_results: liste des résultats par fold
+        aggregate: métriques agrégées (mean/std)
+        run_name: nom du run (auto-généré si None)
+        mode: "train" ou "live"
+
+    Returns:
+        Chemin du fichier sauvegardé
+    """
+    _ensure_dirs(mode)
+    dirs = _get_dirs(mode)
+
+    if run_name is None:
+        run_name = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    filepath = dirs["walk_forward"] / f"walk_forward_{run_name}.json"
+
+    entry = {
+        "run_name": run_name,
+        "mode": mode,
+        "timestamp": datetime.now().isoformat(),
+        "n_folds": len(fold_results),
+        "fold_results": [{k: _serialize(v) for k, v in f.items()} for f in fold_results],
+        "aggregate": {k: _serialize(v) for k, v in aggregate.items()},
+    }
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(entry, f, indent=2, ensure_ascii=False)
+
+    logger.info(f"Walk-forward résultat sauvegardé: {filepath}")
+    return filepath
+
+
+def load_walk_forward_results(mode: Mode = "train") -> list[dict]:
+    """
+    Charge tous les résultats de walk-forward validation.
+
+    Returns:
+        Liste de dicts de résultats, triés par date
+    """
+    _ensure_dirs(mode)
+    dirs = _get_dirs(mode)
+    results = []
+
+    for filepath in sorted(dirs["walk_forward"].glob("walk_forward_*.json")):
         with open(filepath, "r", encoding="utf-8") as f:
             results.append(json.load(f))
 

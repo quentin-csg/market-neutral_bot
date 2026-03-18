@@ -1,10 +1,11 @@
 """
 Trading Bot RL — Point d'entrée principal.
 Usage:
-    python main.py train        Lancer l'entraînement
-    python main.py backtest     Lancer le backtest sur données de test
-    python main.py live         Lancer le trading live/paper
-    python main.py dashboard    Lancer le dashboard Streamlit
+    python main.py train          Lancer l'entraînement
+    python main.py backtest       Lancer le backtest sur données de test
+    python main.py walk-forward   Lancer la walk-forward validation
+    python main.py live           Lancer le trading live/paper
+    python main.py dashboard      Lancer le dashboard Streamlit
 """
 
 import argparse
@@ -31,7 +32,7 @@ Exemples:
 
     parser.add_argument(
         "command",
-        choices=["train", "backtest", "live", "dashboard"],
+        choices=["train", "backtest", "walk-forward", "live", "dashboard"],
         help="Commande à exécuter",
     )
 
@@ -90,6 +91,15 @@ Exemples:
             model_name=args.model,
             include_nlp=args.nlp,
         )
+
+    elif args.command == "walk-forward":
+        from training.walk_forward import walk_forward_validate
+
+        print("Lancement de la walk-forward validation...")
+        kwargs = {"include_nlp": args.nlp}
+        if args.timesteps:
+            kwargs["total_timesteps"] = args.timesteps
+        walk_forward_validate(**kwargs)
 
     elif args.command == "live":
         from live.executor import run_live
