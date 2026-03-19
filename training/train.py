@@ -85,6 +85,8 @@ def train(
     use_subproc: bool = True,
     seed: Optional[int] = None,
     warm_start_model: Optional[str] = None,
+    log_interval: int = 1,
+    save_checkpoints: bool = True,
 ) -> Path:
     """
     Lance l'entraînement PPO.
@@ -177,19 +179,21 @@ def train(
     checkpoint_dir = MODELS_DIR / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    checkpoint_callback = CheckpointCallback(
-        save_freq=max(CHECKPOINT_FREQ // n_envs, 1),
-        save_path=str(checkpoint_dir),
-        name_prefix=model_name,
-        verbose=1,
-    )
-
     early_stop = EarlyStoppingCallback(
         check_freq=max(CHECKPOINT_FREQ // n_envs, 1),
         patience=EARLY_STOPPING_PATIENCE,
     )
 
-    callbacks = CallbackList([checkpoint_callback, early_stop])
+    if save_checkpoints:
+        checkpoint_callback = CheckpointCallback(
+            save_freq=max(CHECKPOINT_FREQ // n_envs, 1),
+            save_path=str(checkpoint_dir),
+            name_prefix=model_name,
+            verbose=1,
+        )
+        callbacks = CallbackList([checkpoint_callback, early_stop])
+    else:
+        callbacks = CallbackList([early_stop])
 
     # 4. Entraîner
     print(f"[4/4] Entraînement en cours ({total_timesteps} steps)...")
@@ -200,6 +204,7 @@ def train(
         callback=callbacks,
         tb_log_name=run_name,
         progress_bar=True,
+        log_interval=log_interval,
     )
 
     # Sauvegarder le modèle final et les stats VecNormalize

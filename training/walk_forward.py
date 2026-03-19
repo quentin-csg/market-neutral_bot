@@ -14,6 +14,7 @@ import numpy as np
 from dateutil.relativedelta import relativedelta
 
 from config.settings import (
+    PPO_HYPERPARAMS,
     TOTAL_TIMESTEPS,
     TRAIN_START,
     WF_PURGE_HOURS,
@@ -168,6 +169,8 @@ def walk_forward_validate(
         if prev_model_name:
             print(f"  → Warm start depuis fold {fold_id - 1}: {prev_model_name}")
         try:
+            n_steps = PPO_HYPERPARAMS.get("n_steps", 2048)
+            log_interval = max(1, 100_000 // n_steps)
             train(
                 train_start=fold["train_start"],
                 train_end=fold["train_end"],
@@ -177,6 +180,8 @@ def walk_forward_validate(
                 include_nlp=include_nlp,
                 use_subproc=False,
                 warm_start_model=prev_model_name,
+                log_interval=log_interval,
+                save_checkpoints=False,
             )
         except Exception as e:
             logger.error(f"Fold {fold_id} train échoué: {e}")
