@@ -7,7 +7,7 @@ Valide la robustesse du modèle PPO avec des fenêtres glissantes :
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import numpy as np
@@ -16,6 +16,7 @@ from dateutil.relativedelta import relativedelta
 from config.settings import (
     TOTAL_TIMESTEPS,
     TRAIN_START,
+    WF_PURGE_HOURS,
     WF_STEP_MONTHS,
     WF_TEST_MONTHS,
     WF_TRAIN_MONTHS,
@@ -33,12 +34,14 @@ def generate_folds(
     train_months: int = WF_TRAIN_MONTHS,
     test_months: int = WF_TEST_MONTHS,
     step_months: int = WF_STEP_MONTHS,
+    purge_hours: int = WF_PURGE_HOURS,
 ) -> list[dict]:
     """
     Génère les folds pour walk-forward validation (expanding window).
 
     Le train_start reste fixe, train_end avance de step_months à chaque fold.
-    Le test couvre les test_months suivant le train_end.
+    Un gap de purge (purge_hours) est inséré entre train et test pour éliminer
+    le data leakage dû aux features à fenêtre glissante (SMA, RSI, frame stack...).
 
     Args:
         data_start: date de début des données
@@ -46,6 +49,7 @@ def generate_folds(
         train_months: durée initiale du train en mois
         test_months: durée du test en mois
         step_months: pas d'avancement en mois
+        purge_hours: nombre d'heures de gap entre train et test
 
     Returns:
         Liste de dicts avec fold_id, train_start, train_end, test_start, test_end
@@ -58,7 +62,8 @@ def generate_folds(
     train_end = start + relativedelta(months=train_months)
 
     while True:
-        test_start = train_end
+        # Gap de purge : le test commence purge_hours après la fin du train
+        test_start = train_end + timedelta(hours=purge_hours)
         test_end = test_start + relativedelta(months=test_months)
 
         if test_end > end:
@@ -68,7 +73,7 @@ def generate_folds(
             "fold_id": fold_id,
             "train_start": start.strftime("%Y-%m-%d"),
             "train_end": train_end.strftime("%Y-%m-%d"),
-            "test_start": test_start.strftime("%Y-%m-%d"),
+            "test_start": test_start.strftime("%Y-%m-%d %H:%M"),
             "test_end": test_end.strftime("%Y-%m-%d"),
         })
 
@@ -111,6 +116,7 @@ def walk_forward_validate(
     train_months: int = WF_TRAIN_MONTHS,
     test_months: int = WF_TEST_MONTHS,
     step_months: int = WF_STEP_MONTHS,
+    purge_hours: int = WF_PURGE_HOURS,
     total_timesteps: int = TOTAL_TIMESTEPS,
     include_nlp: bool = False,
     data_start: str = TRAIN_START,
@@ -133,17 +139,18 @@ def walk_forward_validate(
         train_months=train_months,
         test_months=test_months,
         step_months=step_months,
+        purge_hours=purge_hours,
     )
 
     if not folds:
         print("Aucun fold généré. Vérifiez les dates et paramètres.")
         return {"fold_results": [], "aggregate": {}}
 
-    print(f"=== Walk-Forward Validation: {len(folds)} folds ===")
+    print(f"=== Walk-Forward Validation: {len(folds)} folds (purge={purge_hours}h) ===")
     for f in folds:
         print(
             f"  Fold {f['fold_id']}: Train {f['train_start']} → {f['train_end']} | "
-            f"Test {f['test_start']} → {f['test_end']}"
+            f"Purge {purge_hours}h | Test {f['test_start']} → {f['test_end']}"
         )
     print()
 

@@ -18,6 +18,7 @@ class TestGenerateFolds(unittest.TestCase):
             train_months=12,
             test_months=3,
             step_months=3,
+            purge_hours=0,  # sans purge pour compter les folds comme avant
         )
         # 2022-01 + 12m train = 2023-01 test_end
         # Folds: 2023-01→04, 2023-04→07, 2023-07→10, 2023-10→2024-01
@@ -65,18 +66,36 @@ class TestGenerateFolds(unittest.TestCase):
         train_starts = [f["train_start"] for f in folds]
         self.assertTrue(all(s == "2022-01-01" for s in train_starts))
 
-    def test_test_start_equals_train_end(self):
-        """test_start = train_end pour chaque fold."""
+    def test_test_start_after_train_end_with_purge(self):
+        """test_start = train_end + purge_hours pour chaque fold."""
+        from datetime import datetime, timedelta
         from training.walk_forward import generate_folds
+        # Avec purge
         folds = generate_folds(
             data_start="2022-01-01",
-            data_end="2024-01-01",
+            data_end="2024-06-01",
             train_months=12,
             test_months=3,
             step_months=3,
+            purge_hours=200,
         )
         for fold in folds:
-            self.assertEqual(fold["test_start"], fold["train_end"])
+            train_end = datetime.strptime(fold["train_end"], "%Y-%m-%d")
+            test_start = datetime.strptime(fold["test_start"], "%Y-%m-%d %H:%M")
+            expected = train_end + timedelta(hours=200)
+            self.assertEqual(test_start, expected)
+
+        # Sans purge, test_start == train_end
+        folds_no_purge = generate_folds(
+            data_start="2022-01-01",
+            data_end="2024-06-01",
+            train_months=12,
+            test_months=3,
+            step_months=3,
+            purge_hours=0,
+        )
+        for fold in folds_no_purge:
+            self.assertEqual(fold["test_start"], fold["train_end"] + " 00:00")
 
     def test_no_folds_when_data_too_short(self):
         """Retourne 0 folds si les données ne couvrent pas au moins 1 fold."""
@@ -91,7 +110,7 @@ class TestGenerateFolds(unittest.TestCase):
         self.assertEqual(len(folds), 0)
 
     def test_dates_are_strings(self):
-        """Les dates dans les folds sont des strings ISO."""
+        """Les dates dans les folds sont des strings parseables."""
         from training.walk_forward import generate_folds
         folds = generate_folds(
             data_start="2022-01-01",
@@ -99,12 +118,17 @@ class TestGenerateFolds(unittest.TestCase):
             train_months=12,
             test_months=3,
             step_months=3,
+            purge_hours=0,
         )
         for fold in folds:
             for key in ("train_start", "train_end", "test_start", "test_end"):
                 self.assertIsInstance(fold[key], str)
-                # Vérifie que c'est parseable
-                datetime.strptime(fold[key], "%Y-%m-%d")
+            # train_start, train_end, test_end = %Y-%m-%d
+            datetime.strptime(fold["train_start"], "%Y-%m-%d")
+            datetime.strptime(fold["train_end"], "%Y-%m-%d")
+            datetime.strptime(fold["test_end"], "%Y-%m-%d")
+            # test_start = %Y-%m-%d %H:%M (inclut le purge offset)
+            datetime.strptime(fold["test_start"], "%Y-%m-%d %H:%M")
 
     def test_expanding_window(self):
         """train_end avance de step_months à chaque fold."""

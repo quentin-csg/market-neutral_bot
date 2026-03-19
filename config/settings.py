@@ -131,6 +131,8 @@ EARLY_STOPPING_PATIENCE = 5        # Arrêter si pas d'amélioration après N ch
 WF_TRAIN_MONTHS = 24               # Durée initiale du train (mois)
 WF_TEST_MONTHS = 3                 # Durée du test (mois)
 WF_STEP_MONTHS = 3                 # Pas d'avancement (mois)
+WF_PURGE_HOURS = 200               # Gap de purge entre train et test (≈ SMA_LONG)
+                                   # Élimine le data leakage dû aux features à fenêtre glissante
 
 # Logs séparés train / live
 LOGS_TRAIN_DIR = LOGS_DIR / "train"
