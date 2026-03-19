@@ -62,7 +62,7 @@ def build_dataset(
     if start is None:
         start = TRAIN_START
     if end is None:
-        end = TRAIN_END
+        end = datetime.now().strftime("%Y-%m-%d")
 
     logger.info(f"=== Construction du dataset {symbol} ({start} → {end}) ===")
 
