@@ -7,6 +7,7 @@ Valide la robustesse du modèle PPO avec des fenêtres glissantes :
 """
 
 import logging
+import traceback
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -74,7 +75,7 @@ def generate_folds(
             "fold_id": fold_id,
             "train_start": start.strftime("%Y-%m-%d"),
             "train_end": train_end.strftime("%Y-%m-%d"),
-            "test_start": test_start.strftime("%Y-%m-%d %H:%M"),
+            "test_start": test_start.strftime("%Y-%m-%d"),
             "test_end": test_end.strftime("%Y-%m-%d"),
         })
 
@@ -186,6 +187,7 @@ def walk_forward_validate(
         except Exception as e:
             logger.error(f"Fold {fold_id} train échoué: {e}")
             print(f"  ⚠ Train échoué: {e}")
+            traceback.print_exc()
             continue
 
         prev_model_name = model_name  # Fold suivant part d'ici
@@ -207,6 +209,7 @@ def walk_forward_validate(
         except Exception as e:
             logger.error(f"Fold {fold_id} backtest échoué: {e}")
             print(f"  ⚠ Backtest échoué: {e}")
+            traceback.print_exc()
             continue
 
     # 3. Agréger

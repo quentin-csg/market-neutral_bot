@@ -56,11 +56,13 @@ def fetch_ohlcv(
 
     since_ms = None
     if since:
-        since_ms = exchange.parse8601(f"{since}T00:00:00Z")
+        date_part = since.strip()[:10]  # "YYYY-MM-DD" only (strip time if present)
+        since_ms = exchange.parse8601(f"{date_part}T00:00:00Z")
 
     until_ms = None
     if until:
-        until_ms = exchange.parse8601(f"{until}T23:59:59Z")
+        date_part = until.strip()[:10]
+        until_ms = exchange.parse8601(f"{date_part}T23:59:59Z")
 
     all_ohlcv = []
     logger.info(f"Fetching {symbol} {timeframe} depuis {since or 'le début'}...")
