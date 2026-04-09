@@ -1,9 +1,3 @@
-# =============================================================================
-# Trading Bot RL — .gitignore
-# =============================================================================
-
-# --- Python ---
-__pycache__/
 *.py[codz]
 *$py.class
 *.so
@@ -11,42 +5,25 @@ __pycache__/
 *.egg-info/
 dist/
 build/
-
-# --- Environnements virtuels ---
 .venv/
 venv/
 ENV/
-# NOTE: env/ n'est PAS ignoré (c'est notre module Gymnasium)
-
-# --- Variables d'environnement / secrets ---
 .env
 .envrc
-
-# --- Tests ---
 .pytest_cache/
 .coverage
 htmlcov/
-
-# --- IDE ---
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
-
-# --- Jupyter ---
 .ipynb_checkpoints/
-
-# --- Trading Bot : fichiers générés ---
 models/
 logs/
 *.zip
-
-# --- FinBERT / Transformers cache ---
 .cache/
 huggingface/
-
-# --- OS ---
 Thumbs.db
 Desktop.ini
 .DS_Store
