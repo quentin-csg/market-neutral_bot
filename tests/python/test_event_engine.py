@@ -34,31 +34,27 @@ async def test_event_backtest_positive_return_on_high_funding(tmp_path, monkeypa
 
     monkeypatch.setattr(event_engine, "DATA_DIR", tmp_path)
 
-    await event_engine.run_event_backtest("2020-01-01", "2020-01-10")
+    result = await event_engine.run_event_backtest("2020-01-01", "2020-01-10")
 
-    # Can't assert return_pct directly (logged, not returned), but if the function
-    # completes without error and at least one trade was opened, funding accrued.
-    # The real assertion: no exception raised (strategy entered & received payments).
+    assert result["num_trades"] >= 0, "backtest must complete"
+    assert result["cumulative_funding"] > 0, "funding payments must have accrued"
+    assert result["total_return_pct"] > 0, "return must be positive with high constant funding"
+    assert result["final_equity"] > 1000.0, "equity must have grown"
 
 
 async def test_event_backtest_no_entry_below_threshold(tmp_path, monkeypatch):
-    """With funding below entry threshold, strategy never enters."""
+    """With funding below entry threshold, strategy never enters — equity unchanged."""
     # 0.00001 * 3 * 365 = 0.01095 → ~1% APR < 10% threshold
     _funding_parquet(tmp_path, rates=[0.00001] * 10)
     _klines_parquet(tmp_path)
 
     monkeypatch.setattr(event_engine, "DATA_DIR", tmp_path)
 
-    # Monkeypatch SimPortfolio to inspect final state
-    original_class = event_engine.SimPortfolio
-    last_portfolio = {}
+    result = await event_engine.run_event_backtest("2020-01-01", "2020-01-04")
 
-    class SpyPortfolio(original_class):
-        pass
-
-    monkeypatch.setattr(event_engine, "SimPortfolio", SpyPortfolio)
-    await event_engine.run_event_backtest("2020-01-01", "2020-01-04")
-    # No entry → no trades → equity unchanged at 1000 (only assert no crash)
+    assert result["num_trades"] == 0, "no trades should be opened below threshold"
+    assert result["cumulative_funding"] == 0.0, "no funding collected when never in position"
+    assert result["final_equity"] == 1000.0, "equity unchanged when strategy never enters"
 
 
 async def test_event_backtest_empty_data_raises(tmp_path, monkeypatch):

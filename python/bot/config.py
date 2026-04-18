@@ -73,6 +73,3 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "BINANCE_API_KEY and BINANCE_API_SECRET must be set in .env"
             )
-
-
-settings = Settings()

@@ -1,7 +1,7 @@
 """Event-driven backtest engine — shares strategy.py with the live orchestrator.
 
 Simulates:
-  - Funding rate payments every 8h.
+  - Funding rate payments every 8h (on current mark price, not entry price).
   - Maker fees on entry/exit (spot ask + perp bid at time of signal).
   - Simple slippage: entry at ask, exit at bid.
   - Risk checks (delta, margin, kill-switch) via shared RiskManager.
@@ -38,7 +38,7 @@ class SimPortfolio:
     trades: list = field(default_factory=list)
 
 
-async def run_event_backtest(start: str, end: str) -> None:
+async def run_event_backtest(start: str, end: str) -> dict:
     from bot.config import Settings
     settings = Settings()
 
@@ -77,9 +77,9 @@ async def run_event_backtest(start: str, end: str) -> None:
         # Mark tick so stale check passes.
         risk.record_tick()
 
-        # Funding payment if in position: we receive as short perp holder.
+        # Funding payment: Binance calculates on mark price at payment time, not entry price.
         if portfolio.perp_qty > 0:
-            payment = portfolio.perp_qty * portfolio.perp_entry_price * fr
+            payment = portfolio.perp_qty * price * fr
             portfolio.equity += payment
             portfolio.cumulative_funding += payment
 
@@ -116,7 +116,7 @@ async def run_event_backtest(start: str, end: str) -> None:
         if signal is Signal.ENTER and portfolio.spot_qty == 0:
             notional = min(portfolio.equity * Decimal("0.5"), Decimal("500"))
             qty = (notional / spot_ask).quantize(Decimal("0.00001"))
-            fee = qty * spot_ask * MAKER_FEE * 2   # spot + perp entry
+            fee = qty * spot_ask * MAKER_FEE + qty * perp_bid * MAKER_FEE
             portfolio.equity -= fee
             portfolio.spot_qty = qty
             portfolio.perp_qty = qty
@@ -127,7 +127,7 @@ async def run_event_backtest(start: str, end: str) -> None:
         elif signal is Signal.EXIT and portfolio.spot_qty > 0:
             pnl_spot = portfolio.spot_qty * (spot_bid - portfolio.spot_entry_price)
             pnl_perp = portfolio.perp_qty * (portfolio.perp_entry_price - perp_ask)
-            fee = portfolio.spot_qty * spot_bid * TAKER_FEE * 2
+            fee = portfolio.spot_qty * spot_bid * TAKER_FEE + portfolio.perp_qty * perp_ask * TAKER_FEE
             net_pnl = pnl_spot + pnl_perp - fee
             portfolio.equity += net_pnl
             portfolio.trades.append({
@@ -144,13 +144,14 @@ async def run_event_backtest(start: str, end: str) -> None:
             break
 
     total_return = (portfolio.equity - initial_equity) / initial_equity
-    log.info(
-        "event_backtest_result",
-        total_return_pct=round(float(total_return) * 100, 2),
-        cumulative_funding=float(portfolio.cumulative_funding),
-        num_trades=len(portfolio.trades),
-        final_equity=float(portfolio.equity),
-    )
+    result = {
+        "total_return_pct": round(float(total_return) * 100, 2),
+        "cumulative_funding": float(portfolio.cumulative_funding),
+        "num_trades": len(portfolio.trades),
+        "final_equity": float(portfolio.equity),
+    }
+    log.info("event_backtest_result", **result)
+    return result
 
 
 def _load(path: Path, start: str, end: str) -> pd.DataFrame:

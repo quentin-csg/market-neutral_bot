@@ -2,8 +2,9 @@
 
 import asyncio
 import json
+import os
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import TypedDict
 
 from bot.config import BotMode, Settings
@@ -37,6 +38,7 @@ class PortfolioState:
     spot_notional: Decimal = Decimal("0")    # long spot cost basis (USDT)
     perp_notional: Decimal = Decimal("0")    # short perp notional (USDT)
     spot_qty: Decimal = Decimal("0")         # BTC held long
+    perp_qty: Decimal = Decimal("0")         # BTC short on perp (tracked separately)
     spot_entry_ask: Decimal = Decimal("0")   # spot ask price at entry
     perp_entry_bid: Decimal = Decimal("0")   # perp bid price at entry (short)
     equity: Decimal = Decimal("1000")        # starting paper equity
@@ -62,6 +64,8 @@ class Orchestrator:
         self.portfolio = PortfolioState()
         self._spot_tick: MarketTick | None = None
         self._perp_tick: MarketTick | None = None
+        self._prev_funding_ms: int = 0    # detects funding payment events
+        self._risk_last_reason: str = ""  # throttle risk_check_blocked log
 
     # ── State persistence ────────────────────────────────────────────────────
 
@@ -69,7 +73,10 @@ class Orchestrator:
         if self.settings.state_file is None:
             return
         data = {k: str(v) for k, v in vars(self.portfolio).items()}
-        self.settings.state_file.write_text(json.dumps(data))
+        # Atomic write: tmp + os.replace avoids corrupt JSON on crash/kill.
+        tmp = self.settings.state_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data))
+        os.replace(tmp, self.settings.state_file)
         log.debug("state_saved", equity=str(self.portfolio.equity))
 
     def _load_state(self) -> None:
@@ -139,8 +146,27 @@ class Orchestrator:
         spot = self._spot_tick
         perp = self._perp_tick
 
-        funding_rate = Decimal(perp["funding_rate"])
+        try:
+            funding_rate = Decimal(perp["funding_rate"])
+        except (InvalidOperation, TypeError):
+            log.warning("invalid_funding_rate", raw=str(perp.get("funding_rate")))
+            return
+
         funding_apr = compute_funding_apr(funding_rate)
+
+        # Detect funding payment: next_funding_ms jumps forward when a payment fires.
+        current_funding_ms = perp["next_funding_ms"]
+        if self._prev_funding_ms != 0 and current_funding_ms > self._prev_funding_ms:
+            if self.portfolio.perp_notional > 0:
+                payment = funding_rate * self.portfolio.perp_notional
+                self.portfolio.equity += payment
+                log.info(
+                    "funding_payment",
+                    amount=str(payment),
+                    equity=str(self.portfolio.equity),
+                    funding_rate=str(funding_rate),
+                )
+        self._prev_funding_ms = current_funding_ms
 
         # Check reverse funding → force exit
         if self.risk.check_funding_floor(funding_apr):
@@ -157,11 +183,11 @@ class Orchestrator:
                 log.error("close_position_failed", reason="reverse_funding", error=str(exc))
             return
 
-        # Run standard risk checks (delta computed from current mark prices)
+        # Run standard risk checks (delta uses separately tracked perp_qty)
         try:
             self.risk.pre_signal_checks(
                 spot_qty=self.portfolio.spot_qty,
-                perp_qty=self.portfolio.spot_qty,  # always equal in cash-and-carry
+                perp_qty=self.portfolio.perp_qty,
                 spot_mark=Decimal(spot["mark_price"]),
                 perp_mark=Decimal(perp["mark_price"]),
                 equity=self.portfolio.equity,
@@ -170,8 +196,12 @@ class Orchestrator:
                 funding_apr=funding_apr,
             )
         except RiskError as e:
-            log.warning("risk_check_blocked", reason=str(e))
+            reason = str(e)
+            if reason != self._risk_last_reason:
+                log.warning("risk_check_blocked", reason=reason)
+                self._risk_last_reason = reason
             return
+        self._risk_last_reason = ""
 
         signal = self.strategy.on_tick(
             spot_bid=Decimal(spot["best_bid"]),
@@ -184,11 +214,15 @@ class Orchestrator:
         if signal is Signal.ENTER:
             try:
                 await self._open_position(spot, perp)
+            except Exception as exc:
+                log.error("open_position_failed", error=str(exc))
             finally:
                 self.strategy.state.in_position = self.portfolio.spot_qty > Decimal("0")
         elif signal is Signal.EXIT:
             try:
                 await self._close_position(spot, perp, reason="signal")
+            except Exception as exc:
+                log.error("close_position_failed", reason="signal", error=str(exc))
             finally:
                 self.strategy.state.in_position = self.portfolio.spot_qty > Decimal("0")
 
@@ -204,6 +238,9 @@ class Orchestrator:
 
         spot_ask = Decimal(spot["best_ask"])
         qty = (notional / spot_ask).quantize(Decimal("0.00001"))
+        if qty <= Decimal("0"):
+            log.warning("open_position_skipped", reason="qty_rounds_to_zero")
+            return
 
         log.info(
             "open_position",
@@ -216,9 +253,10 @@ class Orchestrator:
         if self.settings.bot_mode == BotMode.paper:
             perp_bid = Decimal(perp["best_bid"])
             perp_notional = qty * perp_bid
-            fees = notional * (SPOT_TAKER_FEE + FUTURES_TAKER_FEE)
+            fees = qty * spot_ask * SPOT_TAKER_FEE + qty * perp_bid * FUTURES_TAKER_FEE
 
             self.portfolio.spot_qty = qty
+            self.portfolio.perp_qty = qty
             self.portfolio.spot_entry_ask = spot_ask
             self.portfolio.perp_entry_bid = perp_bid
             self.portfolio.spot_notional = qty * spot_ask
@@ -246,13 +284,14 @@ class Orchestrator:
             # Long spot: bought at entry_ask, selling at close bid
             pnl_spot = self.portfolio.spot_qty * (spot_bid - self.portfolio.spot_entry_ask)
             # Short perp: sold at entry_bid, buying back at close ask
-            pnl_perp = self.portfolio.spot_qty * (self.portfolio.perp_entry_bid - perp_ask)
-            close_notional = self.portfolio.spot_qty * (spot_bid + perp_ask) / Decimal("2")
-            fees = close_notional * (SPOT_TAKER_FEE + FUTURES_TAKER_FEE)
+            pnl_perp = self.portfolio.perp_qty * (self.portfolio.perp_entry_bid - perp_ask)
+            fees = (self.portfolio.spot_qty * spot_bid * SPOT_TAKER_FEE
+                    + self.portfolio.perp_qty * perp_ask * FUTURES_TAKER_FEE)
             pnl = pnl_spot + pnl_perp - fees
 
             self.portfolio.equity += pnl
             self.portfolio.spot_qty = Decimal("0")
+            self.portfolio.perp_qty = Decimal("0")
             self.portfolio.spot_entry_ask = Decimal("0")
             self.portfolio.perp_entry_bid = Decimal("0")
             self.portfolio.spot_notional = Decimal("0")

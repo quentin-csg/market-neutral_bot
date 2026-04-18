@@ -5,7 +5,7 @@ use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use tokio::sync::broadcast;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::types::{Market, Tick};
@@ -17,6 +17,9 @@ const SPOT_WS_TESTNET: &str = "wss://testnet.binance.vision/stream?streams=";
 const FUTURES_WS_TESTNET: &str = "wss://stream.binancefuture.com/stream?streams=";
 
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+/// Binance sends a ping every ~3 min and closes if no pong in 10 min.
+/// 30s silence means the connection has stalled — force reconnect.
+const WS_RECV_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct MarketDataConfig {
     pub symbol: String,    // e.g. "btcusdt"
@@ -104,29 +107,40 @@ async fn connect_and_stream_spot(
     let (mut ws, _) = connect_async(url).await.context("spot WS connect")?;
     tracing::info!("spot WS connected: {url}");
 
-    while let Some(msg) = ws.next().await {
-        let msg = msg.context("spot WS recv")?;
-        if let Message::Text(text) = msg {
-            if let Ok(env) = serde_json::from_str::<WsEnvelope<BookTickerMsg>>(&text) {
-                let m = env.data;
-                let tick = Tick {
-                    market: Market::Spot,
-                    symbol: symbol.to_string(),
-                    ts_ms: crate::types::now_ms(),
-                    best_bid: m.best_bid,
-                    best_bid_qty: m.best_bid_qty,
-                    best_ask: m.best_ask,
-                    best_ask_qty: m.best_ask_qty,
-                    funding_rate: Decimal::ZERO,
-                    next_funding_ms: 0,
-                    mark_price: (m.best_bid + m.best_ask) / Decimal::TWO,
-                };
-                let _ = tx.send(tick);
+    loop {
+        match timeout(WS_RECV_TIMEOUT, ws.next()).await {
+            Err(_elapsed) => {
+                tracing::warn!(market = "spot", "ws_heartbeat_timeout: no data for 30s");
+                break;
             }
-        } else if let Message::Ping(data) = msg {
-            ws.send(Message::Pong(data)).await?;
-        } else if let Message::Close(_) = msg {
-            break;
+            Ok(None) => break,
+            Ok(Some(Err(e))) => return Err(e.into()),
+            Ok(Some(Ok(msg))) => {
+                if let Message::Text(text) = msg {
+                    if let Ok(env) = serde_json::from_str::<WsEnvelope<BookTickerMsg>>(&text) {
+                        let m = env.data;
+                        let tick = Tick {
+                            market: Market::Spot,
+                            symbol: symbol.to_string(),
+                            ts_ms: crate::types::now_ms(),
+                            best_bid: m.best_bid,
+                            best_bid_qty: m.best_bid_qty,
+                            best_ask: m.best_ask,
+                            best_ask_qty: m.best_ask_qty,
+                            funding_rate: Decimal::ZERO,
+                            next_funding_ms: 0,
+                            mark_price: (m.best_bid + m.best_ask) / Decimal::TWO,
+                        };
+                        let _ = tx.send(tick);
+                    } else {
+                        tracing::error!(market = "spot", raw = %text, "ws_parse_error");
+                    }
+                } else if let Message::Ping(data) = msg {
+                    ws.send(Message::Pong(data)).await?;
+                } else if let Message::Close(_) = msg {
+                    break;
+                }
+            }
         }
     }
     Ok(())
@@ -193,38 +207,49 @@ async fn connect_and_stream_futures(
 
     let mut state = FuturesState::default();
 
-    while let Some(msg) = ws.next().await {
-        let msg = msg.context("futures WS recv")?;
-        if let Message::Text(text) = msg {
-            // Single parse via untagged enum — no serde_json::Value intermediate.
-            if let Ok(env) = serde_json::from_str::<WsEnvelope<FuturesMsg>>(&text) {
-                match env.data {
-                    FuturesMsg::MarkPrice(m) => {
-                        state.mark_price = m.mark_price;
-                        state.funding_rate = m.funding_rate;
-                        state.next_funding_ms = m.next_funding_ms;
+    loop {
+        match timeout(WS_RECV_TIMEOUT, ws.next()).await {
+            Err(_elapsed) => {
+                tracing::warn!(market = "futures", "ws_heartbeat_timeout: no data for 30s");
+                break;
+            }
+            Ok(None) => break,
+            Ok(Some(Err(e))) => return Err(e.into()),
+            Ok(Some(Ok(msg))) => {
+                if let Message::Text(text) = msg {
+                    // Single parse via untagged enum — no serde_json::Value intermediate.
+                    if let Ok(env) = serde_json::from_str::<WsEnvelope<FuturesMsg>>(&text) {
+                        match env.data {
+                            FuturesMsg::MarkPrice(m) => {
+                                state.mark_price = m.mark_price;
+                                state.funding_rate = m.funding_rate;
+                                state.next_funding_ms = m.next_funding_ms;
+                            }
+                            FuturesMsg::BookTicker(m) => {
+                                let tick = Tick {
+                                    market: Market::UsdtPerpetual,
+                                    symbol: symbol.to_string(),
+                                    ts_ms: crate::types::now_ms(),
+                                    best_bid: m.best_bid,
+                                    best_bid_qty: m.best_bid_qty,
+                                    best_ask: m.best_ask,
+                                    best_ask_qty: m.best_ask_qty,
+                                    funding_rate: state.funding_rate,
+                                    next_funding_ms: state.next_funding_ms,
+                                    mark_price: state.mark_price,
+                                };
+                                let _ = tx.send(tick);
+                            }
+                        }
+                    } else {
+                        tracing::error!(market = "futures", raw = %text, "ws_parse_error");
                     }
-                    FuturesMsg::BookTicker(m) => {
-                        let tick = Tick {
-                            market: Market::UsdtPerpetual,
-                            symbol: symbol.to_string(),
-                            ts_ms: crate::types::now_ms(),
-                            best_bid: m.best_bid,
-                            best_bid_qty: m.best_bid_qty,
-                            best_ask: m.best_ask,
-                            best_ask_qty: m.best_ask_qty,
-                            funding_rate: state.funding_rate,
-                            next_funding_ms: state.next_funding_ms,
-                            mark_price: state.mark_price,
-                        };
-                        let _ = tx.send(tick);
-                    }
+                } else if let Message::Ping(data) = msg {
+                    ws.send(Message::Pong(data)).await?;
+                } else if let Message::Close(_) = msg {
+                    break;
                 }
             }
-        } else if let Message::Ping(data) = msg {
-            ws.send(Message::Pong(data)).await?;
-        } else if let Message::Close(_) = msg {
-            break;
         }
     }
     Ok(())

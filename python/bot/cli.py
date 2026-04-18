@@ -4,6 +4,8 @@ from pathlib import Path
 
 import typer
 
+from bot.logger import log
+
 app = typer.Typer(help="Market-neutral BTC cash-and-carry bot", add_completion=False)
 
 

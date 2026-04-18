@@ -73,8 +73,8 @@ impl ExecutionClient {
         let resp = send_with_retry(|| {
             self.http.get(&url).header("X-MBX-APIKEY", &self.api_key)
         }).await?;
-        check_status(&resp)?;
-        Ok(resp.json().await?)
+        let body = read_body_checked(resp).await?;
+        Ok(serde_json::from_str(&body).context("parse spot_account_info response")?)
     }
 
     /// GET /fapi/v2/account — futures wallet balance and positions.
@@ -86,8 +86,8 @@ impl ExecutionClient {
         let resp = send_with_retry(|| {
             self.http.get(&url).header("X-MBX-APIKEY", &self.api_key)
         }).await?;
-        check_status(&resp)?;
-        Ok(resp.json().await?)
+        let body = read_body_checked(resp).await?;
+        Ok(serde_json::from_str(&body).context("parse futures_account_info response")?)
     }
 
     pub async fn place_order(
@@ -101,6 +101,8 @@ impl ExecutionClient {
         price: Option<Decimal>,
         client_order_id: &str,
     ) -> Result<Order> {
+        validate_client_order_id(client_order_id)?;
+
         let side_str = match side { Side::Buy => "BUY", Side::Sell => "SELL" };
         let type_str = match order_type { OrderType::Limit => "LIMIT", OrderType::Market => "MARKET" };
 
@@ -122,19 +124,20 @@ impl ExecutionClient {
         let resp = send_with_retry(|| {
             self.http.post(&url).header("X-MBX-APIKEY", &self.api_key)
         }).await?;
-        check_status(&resp)?;
+        let body = read_body_checked(resp).await?;
+        let parsed: PlaceOrderResponse = serde_json::from_str(&body)
+            .context("parse place_order response")?;
 
-        let body: PlaceOrderResponse = resp.json().await?;
         Ok(Order {
             client_order_id: client_order_id.to_string(),
-            exchange_order_id: Some(body.order_id.to_string()),
+            exchange_order_id: Some(parsed.order_id.to_string()),
             market,
             symbol: symbol.to_uppercase(),
             side,
             order_type,
             qty,
             price,
-            status: parse_status(&body.status),
+            status: parse_status(&parsed.status),
             ts_ms,
         })
     }
@@ -156,7 +159,7 @@ impl ExecutionClient {
         let resp = send_with_retry(|| {
             self.http.delete(&url).header("X-MBX-APIKEY", &self.api_key)
         }).await?;
-        check_status(&resp)?;
+        read_body_checked(resp).await?;
         Ok(())
     }
 
@@ -171,7 +174,7 @@ impl ExecutionClient {
         let resp = send_with_retry(|| {
             self.http.delete(&url).header("X-MBX-APIKEY", &self.api_key)
         }).await?;
-        check_status(&resp)?;
+        read_body_checked(resp).await?;
         Ok(())
     }
 
@@ -192,7 +195,7 @@ impl ExecutionClient {
         let resp = send_with_retry(|| {
             self.http.post(&url).header("X-MBX-APIKEY", &self.api_key)
         }).await?;
-        check_status(&resp)?;
+        read_body_checked(resp).await?;
         Ok(())
     }
 
@@ -211,6 +214,29 @@ impl ExecutionClient {
             recv_window_ms: 5000,
         }
     }
+}
+
+/// Validate that client_order_id only contains characters safe for an unsigned query string.
+/// Binance accepts [A-Za-z0-9_-], max 36 chars.
+fn validate_client_order_id(id: &str) -> Result<()> {
+    if id.is_empty() || id.len() > 36 {
+        anyhow::bail!("client_order_id must be 1–36 characters, got {}", id.len());
+    }
+    if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        anyhow::bail!("client_order_id contains invalid characters: {id:?}");
+    }
+    Ok(())
+}
+
+/// Consume the response, read the body, and return an error that includes the
+/// Binance error code + message if the status is a client error (4xx).
+async fn read_body_checked(resp: reqwest::Response) -> Result<String> {
+    let status = resp.status();
+    let body = resp.text().await.context("read response body")?;
+    if status.is_client_error() {
+        anyhow::bail!("Binance client error {status}: {body}");
+    }
+    Ok(body)
 }
 
 /// Retry transient errors (network failures, 5xx). Fail fast on 4xx.
@@ -251,14 +277,6 @@ async fn send_with_retry(
 
 fn is_transient(e: &reqwest::Error) -> bool {
     e.is_timeout() || e.is_connect() || e.is_request()
-}
-
-fn check_status(resp: &reqwest::Response) -> Result<()> {
-    let status = resp.status();
-    if status.is_client_error() {
-        anyhow::bail!("Binance client error {status}");
-    }
-    Ok(())
 }
 
 fn parse_status(s: &str) -> OrderStatus {

@@ -48,12 +48,16 @@ def run_vectorbt(start: str, end: str) -> None:
     pos_changes = entries.astype(int) - exits.astype(int)
     in_position = pos_changes.cumsum().clip(0, 1).astype(bool)
 
-    # Per-period return when in position (funding collected minus amortised entry fee).
-    period_return = (
+    # Per-period funding return when in position.
+    period_funding = (
         funding_apr / (FUNDINGS_PER_DAY * DAYS_PER_YEAR)
-        - MAKER_FEE / (FUNDINGS_PER_DAY * DAYS_PER_YEAR)
-    )
-    returns_series = period_return.where(in_position, 0.0)
+    ).where(in_position, 0.0)
+
+    # Fees charged once at entry and once at exit (not amortised over holding periods).
+    entry_fee_return = entries.astype(float) * (-2 * MAKER_FEE)
+    exit_fee_return = exits.astype(float) * (-2 * TAKER_FEE)
+
+    returns_series = period_funding + entry_fee_return + exit_fee_return
 
     equity = (1 + returns_series).cumprod()
     total_return = equity.iloc[-1] - 1

@@ -39,7 +39,7 @@ python/
     event_engine.py Event-driven backtest (shares strategy.py with live)
     vectorbt_runner.py Vectorized backtest for quick exploration
 
-tests/python/       24 pytest tests, all green
+tests/python/       pytest tests, all green
 ```
 
 ---

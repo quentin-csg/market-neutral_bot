@@ -32,6 +32,18 @@ def test_delta_equity_zero_raises(rm):
         rm.check_delta(Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0"))
 
 
+def test_delta_equity_zero_with_open_position_raises(rm):
+    # Realistic liquidation scenario: equity wiped but position still open.
+    with pytest.raises(RiskError, match="equity is zero"):
+        rm.check_delta(
+            Decimal("0.01"),   # still holding 0.01 BTC spot
+            Decimal("0.01"),   # still short 0.01 BTC perp
+            Decimal("50000"),
+            Decimal("50000"),
+            Decimal("0"),      # equity at zero
+        )
+
+
 def test_margin_ok(rm):
     rm.check_margin(Decimal("10"), Decimal("100"))  # 10*3=30 < 100 free → ok
 

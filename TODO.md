@@ -73,7 +73,6 @@ cd monitoring && docker compose up -d   # Grafana → http://localhost:3000
 - Rust toolchain + `cargo build --release` OK
 - `maturin develop --release` — module Python buildé
 - **37/37 tests Python verts**, **16/16 tests Rust verts**
-- CI GitHub Actions : `pytest` + `cargo test` + `ruff` + `cargo clippy` sur push/PR
 
 ### P1 (avant paper trading)
 

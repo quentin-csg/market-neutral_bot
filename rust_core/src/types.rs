@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system clock before epoch")
+        .unwrap_or_default()
         .as_millis() as u64
 }
 
@@ -55,7 +55,7 @@ pub struct Tick {
     pub funding_rate: Decimal,
     /// Next funding timestamp in ms (perpetual only, else 0).
     pub next_funding_ms: u64,
-    /// Mark price (perpetual) or last trade price (spot).
+    /// Mark price (perpetual) or mid (bid+ask)/2 for spot — not the exchange mark price.
     pub mark_price: Decimal,
 }
 

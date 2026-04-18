@@ -118,6 +118,7 @@ async def test_enters_on_high_apr(mock_rust):
     # Spot tick fills _spot_tick, perp tick fires _on_both_ticks → ENTER
     orc = await _run(mock_rust, [spot(fr=HIGH_FR), perp(fr=HIGH_FR)])
     assert orc.portfolio.spot_qty > Decimal("0"), "should have entered a position"
+    assert orc.portfolio.perp_qty > Decimal("0"), "perp leg must be tracked separately"
 
 
 async def test_pnl_round_trip(mock_rust):
@@ -132,6 +133,7 @@ async def test_pnl_round_trip(mock_rust):
     orc = await _run(mock_rust, ticks)
 
     assert orc.portfolio.spot_qty == Decimal("0"), "should be flat after EXIT"
+    assert orc.portfolio.perp_qty == Decimal("0"), "perp leg must also be flat after EXIT"
     assert orc.portfolio.equity < Decimal("1000"), "fees should have reduced equity"
     # Sanity: two legs × open + close fees on notional ~500 USDT should be < $3
     assert orc.portfolio.equity > Decimal("997"), "total fees should be under $3"
@@ -148,6 +150,7 @@ async def test_force_exit_on_reverse_funding(mock_rust):
     ]
     orc = await _run(mock_rust, ticks)
     assert orc.portfolio.spot_qty == Decimal("0"), "position should be closed on reverse funding"
+    assert orc.portfolio.perp_qty == Decimal("0"), "perp leg must also be closed on reverse funding"
 
 
 async def test_skips_entry_on_kill_switch(mock_rust, tmp_path, monkeypatch):
@@ -158,3 +161,15 @@ async def test_skips_entry_on_kill_switch(mock_rust, tmp_path, monkeypatch):
 
     orc = await _run(mock_rust, [spot(fr=HIGH_FR), perp(fr=HIGH_FR)])
     assert orc.portfolio.spot_qty == Decimal("0"), "kill-switch should block entry"
+    assert orc.portfolio.perp_qty == Decimal("0"), "perp leg should also be unset"
+
+
+async def test_invalid_funding_rate_skips_tick(mock_rust):
+    """A malformed funding_rate string should be caught and the tick skipped without crashing."""
+    bad_perp = perp(fr="NaN")
+    bad_perp["funding_rate"] = "not_a_number"
+    ticks = [spot(fr=HIGH_FR), bad_perp]
+    orc = await _run(mock_rust, ticks)
+    # Bot should have survived — equity unchanged (no position opened)
+    assert orc.portfolio.spot_qty == Decimal("0"), "bad tick should be skipped cleanly"
+    assert orc.portfolio.equity == Decimal("1000"), "equity unchanged after skipped tick"
