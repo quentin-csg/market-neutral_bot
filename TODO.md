@@ -1,4 +1,70 @@
-# TODO — mn-bot
+# mn-bot — BTC Cash-and-Carry
+
+Bot market-neutral : **long spot + short perp Binance** pour capter le funding rate.
+Stack : **Rust** (WS hot path, exécution REST, order book L2 via PyO3) + **Python** (stratégie, risque, orchestrateur, backtest).
+
+> **IMPORTANT — Mentor impitoyable** : Trouve la vérité et dis-la sans ménagement. Ne sois jamais d'accord pour être agréable. Signale les angles morts même non demandés. Force-moi à défendre ou abandonner mes idées.
+
+## Architecture
+
+```text
+rust_core/src/
+  lib.rs           # Bridge PyO3 : MarketDataReceiver + BatchReceiver
+  market_data.rs   # WS Binance (spot bookTicker + futures markPrice), reconnect backoff
+  execution.rs     # REST HMAC-SHA256, retry 5xx, Zeroizing<String> secret
+  order_book.rs    # L2 BTreeMap (protocole depth U/u)
+  types.rs         # Decimal, Market, Order, Tick
+
+python/bot/
+  strategy.py      # CashCarryStrategy, Signal, compute_funding_apr
+  risk.py          # RiskManager (delta, margin, stale, kill-switch HALT)
+  orchestrator.py  # Boucle paper/live, PnL tracking, state persistence JSON
+  config.py        # pydantic-settings + validators
+  logger.py        # structlog JSON/console + RotatingFileHandler
+  cli.py           # mn-bot run / backtest / download
+
+python/backtest/
+  data_loader.py   # Download klines + funding, retry 429/5xx
+  vectorbt_runner.py
+  event_engine.py  # Simulation event-driven avec RiskManager
+
+tests/python/      # 37/37 verts
+tests/             # 16/16 Rust verts (order_book + execution wiremock)
+monitoring/        # Loki + Promtail + Grafana (docker compose)
+```
+
+## Paramètres clés
+
+| Param                | Valeur     | Config           |
+| -------------------- | ---------- | ---------------- |
+| `funding_entry_apr`  | 0.10 (10%) | `.env`           |
+| `funding_exit_apr`   | 0.03 (3%)  | `.env`           |
+| `kelly_fraction`     | 0.5        | `.env`           |
+| `max_notional_usdt`  | variable   | `.env`           |
+| `max_spread_pct`     | 0.001      | `StrategyConfig` |
+| `max_delta_pct`      | 0.02       | `RiskManager`    |
+| `margin_buffer_mult` | 3.0        | `RiskManager`    |
+| `stale_tick_seconds` | 5          | `RiskManager`    |
+
+## Commandes
+
+```bash
+pytest tests/python -v          # 37/37
+cargo test -p rust_core         # 16/16
+cargo build --release
+maturin develop --release       # build + installe le module Python
+
+mn-bot run --mode paper
+mn-bot backtest --engine {vectorbt,event}
+mn-bot download --start YYYY-MM-DD --end YYYY-MM-DD
+
+touch HALT   # kill-switch (stoppe à la prochaine itération)
+rm HALT
+
+cd monitoring && docker compose up -d   # Grafana → http://localhost:3000
+```
+
+---
 
 ## ✅ Fait
 
@@ -135,7 +201,6 @@ async def _refresh_equity(self, interval_s: int = 30) -> None:
 
 async def run(self) -> None:
     ...
-    # Lancer la synchro en parallèle de la boucle ticks
     refresh_task = asyncio.create_task(self._refresh_equity(interval_s=30))
     try:
         async for batch in receiver.batches(32):
@@ -148,7 +213,7 @@ async def run(self) -> None:
 
 #### P2.2 — Compte Binance Testnet
 
-- Action externe : créer un compte sur [testnet.binancefuture.com](https://testnet.binancefuture.com)
+- Créer un compte sur [testnet.binancefuture.com](https://testnet.binancefuture.com)
 - Générer API key + secret, les mettre dans `.env` :
 
   ```env
@@ -157,17 +222,11 @@ async def run(self) -> None:
   BINANCE_TESTNET=true
   ```
 
-- Valider avec : `mn-bot run --mode live` (les ordres vont sur testnet, aucun risque)
-
 #### P2.3 — Limiter l'exposition initiale
-
-Dans `.env` avant le premier live :
 
 ```env
 MAX_NOTIONAL_USDT=100
 ```
-
-(`Settings.max_notional_usdt` est déjà lu depuis `.env`)
 
 ---
 
@@ -175,9 +234,7 @@ MAX_NOTIONAL_USDT=100
 
 #### Alertes latence > 100ms
 
-La latence WS→Python peut être mesurée sans infra supplémentaire. `ts_ms` dans chaque tick est déjà le timestamp Rust au moment de la réception WS (`types::now_ms()` dans `market_data.rs:114`).
-
-Ce qu'il faut ajouter dans `orchestrator.py` (dans `_on_both_ticks`) :
+Ajouter dans `orchestrator.py` (`_on_both_ticks`) :
 
 ```python
 import time
@@ -186,9 +243,7 @@ if latency_ms > 100:
     log.warning("high_latency", latency_ms=latency_ms)
 ```
 
-Le seuil 100ms est une hypothèse — calibrer d'abord sur 1 semaine de paper pour voir la distribution réelle.
-
-Ajouter ensuite une règle Loki dans `monitoring/loki/rules.yml` :
+Puis règle Loki dans `monitoring/loki/rules.yml` :
 
 ```yaml
 - alert: HighLatency
@@ -197,13 +252,11 @@ Ajouter ensuite une règle Loki dans `monitoring/loki/rules.yml` :
 
 #### Réévaluer Kelly fraction
 
-Une fois 1 mois de données live disponibles, calculer le Sharpe ratio et le win-rate réel. Si Sharpe > 1.5 et drawdown < 5%, monter `kelly_fraction` de `0.5` à `0.7` dans `.env` :
+Après 1 mois live : si Sharpe > 1.5 et drawdown < 5%, monter dans `.env` :
 
 ```env
 KELLY_FRACTION=0.7
 ```
-
-(`StrategyConfig.kelly_fraction` est déjà lu depuis `Settings` → pas de code à modifier)
 
 #### Routing alertes Loki
 
@@ -213,4 +266,4 @@ Remplacer dans `monitoring/loki-config.yml` :
 alertmanager_url: http://localhost:9093
 ```
 
-par l'URL Alertmanager réel, puis configurer `alertmanager.yml` avec un receiver Slack/PagerDuty. Aucune modification du code bot.
+par l'URL Alertmanager réel + configurer un receiver Slack/PagerDuty.
